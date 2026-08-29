@@ -1,0 +1,151 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.1"
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release tag before anything is published
+        env:
+          TAG: ${{ github.ref_name }}
+          FINGERPRINT: ${{ vars.RELEASE_SIGNING_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Not a tag build; nothing will be promotable from this run."
+            exit 0
+          fi
+          if [ -z "$FINGERPRINT" ]; then
+            echo "RELEASE_SIGNING_FINGERPRINT is not set." >&2
+            exit 1
+          fi
+          test "$(git cat-file -t "refs/tags/${TAG}")" = tag
+          gpg --import .github/release-signing-key.asc
+          git verify-tag --raw "refs/tags/${TAG}" 2>&1 | grep -q "VALIDSIG ${FINGERPRINT}"
+
+  verify:
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: [preflight, verify]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Build the release binaries
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}" COMMIT="$GITHUB_SHA" ./scripts/build-release.sh
+
+      - name: Source bill of materials
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/sbom.source.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Assemble the release artifacts
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          git -c tar.tar.gz.command='gzip -cn' archive \
+            --format=tar.gz \
+            --prefix="export-tool-${version}/" \
+            -o "dist/export-tool-${version}-source.tar.gz" \
+            "refs/tags/${TAG}"
+          jq -n --arg tag "$TAG" --arg commit "$GITHUB_SHA" --arg go "$GO_VERSION" \
+                '{tag: $tag, commit: $commit, goVersion: $go, buildScript: "scripts/build-release.sh"}' \
+            > dist/release-metadata.json
+          cd dist
+          shasum -a 256 "export-tool-${version}-source.tar.gz" sbom.source.spdx.json release-metadata.json >> SHA256SUMS
+          sort -k2 -o SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/export-tool-*
+            dist/sbom.source.spdx.json
+            dist/release-metadata.json
+            dist/SHA256SUMS
+
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/SHA256SUMS
+          sbom-path: dist/sbom.source.spdx.json
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Sign the checksums
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          {
+            printf 'Source commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Built with Go %s by `scripts/build-release.sh`. The binaries are reproducible:\n' "$GO_VERSION"
+            printf 'check out this tag, run that script with the same Go version, and compare SHA256SUMS.\n'
+          } > dist/notes.md
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes-file dist/notes.md \
+            dist/export-tool-*-darwin-* \
+            dist/export-tool-*-linux-* \
+            dist/export-tool-*-windows-* \
+            "dist/export-tool-${version}-source.tar.gz" \
+            dist/sbom.source.spdx.json \
+            dist/release-metadata.json \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sigstore.json
