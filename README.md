@@ -91,3 +91,7 @@ The builds are `CGO_ENABLED=0`, `-trimpath` and `-buildvcs=false`, with the buil
 ## Security
 
 See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
+
+## Licence
+
+[GNU AGPL v3](LICENSE).
