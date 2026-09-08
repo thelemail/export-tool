@@ -209,7 +209,18 @@ type HTTPError struct {
 	RetryAfter time.Duration
 }
 
-func (e *HTTPError) Error() string { return fmt.Sprintf("http %d: %s", e.Status, e.Body) }
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("http %d: %s", e.Status, summarizeBody(e.Body))
+}
+
+func summarizeBody(body string) string {
+	const maxBodyChars = 200
+	flat := strings.Join(strings.Fields(body), " ")
+	if len(flat) > maxBodyChars {
+		return flat[:maxBodyChars] + "..."
+	}
+	return flat
+}
 
 func (e *HTTPError) Retryable() bool {
 	return e.Status == http.StatusRequestTimeout ||

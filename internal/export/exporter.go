@@ -385,6 +385,7 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 				return builtMessage{}, staged("attachment", err)
 			}
 			lostParts = append(lostParts, lostPart{
+				ordinal:     a.Ordinal,
 				filename:    header.Filename,
 				contentType: header.ContentType,
 				sizeBytes:   header.PlaintextSize,

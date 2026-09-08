@@ -22,6 +22,7 @@ type attachedPart struct {
 }
 
 type lostPart struct {
+	ordinal     int
 	filename    string
 	contentType string
 	sizeBytes   int64
@@ -138,20 +139,19 @@ func writeBase64(b *strings.Builder, payload []byte) {
 }
 
 func placeholderText(l lostPart) string {
-	name := l.filename
-	if name == "" {
-		name = "(unnamed)"
-	}
-	detail := l.contentType
-	if detail == "" {
-		detail = "unknown type"
-	}
-	if l.sizeBytes > 0 {
-		detail = fmt.Sprintf("%s, %d bytes", detail, l.sizeBytes)
+	what := fmt.Sprintf("attachment %d of this message", l.ordinal+1)
+	if l.filename != "" {
+		what = fmt.Sprintf("the attachment %q", l.filename)
+		if l.contentType != "" {
+			what += fmt.Sprintf(" (%s)", l.contentType)
+		}
+		if l.sizeBytes > 0 {
+			what += fmt.Sprintf(", %d bytes,", l.sizeBytes)
+		}
 	}
 	return fmt.Sprintf(
-		"[Thelemail export: the attachment %q (%s) could not be recovered: %s. See export-report.json.]"+crlf,
-		name, detail, l.reason,
+		"[Thelemail export: %s could not be recovered: %s. See export-report.json.]"+crlf,
+		what, l.reason,
 	)
 }
 

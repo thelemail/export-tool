@@ -151,3 +151,15 @@ func TestTransportErrorsDropPresignedQueryStrings(t *testing.T) {
 		t.Fatalf("error lost the object path: %v", err)
 	}
 }
+
+func TestHTTPErrorsCollapseLongBodies(t *testing.T) {
+	body := "<?xml version=\"1.0\"?>\n<Error>\n  <Code>NoSuchKey</Code>\n</Error>"
+	err := &HTTPError{Status: 404, Body: body}
+	if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("error spans multiple lines: %q", err.Error())
+	}
+	long := &HTTPError{Status: 500, Body: strings.Repeat("x", 500)}
+	if len(long.Error()) > 240 {
+		t.Fatalf("error is %d chars", len(long.Error()))
+	}
+}

@@ -282,6 +282,18 @@ func TestAttachToMIMEWritesPlaceholderForLostAttachments(t *testing.T) {
 	}
 }
 
+func TestPlaceholderNamesTheOrdinalWhenTheFilenameIsUnknown(t *testing.T) {
+	src := "From: a@b\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+	got := attachToMIME("msg-12", src, nil, []lostPart{{ordinal: 1, reason: "http 404: NoSuchKey"}})
+
+	if !strings.Contains(got, "attachment 2 of this message") {
+		t.Fatalf("placeholder does not identify the attachment:\n%s", got)
+	}
+	if strings.Contains(got, "unnamed") || strings.Contains(got, "unknown type") {
+		t.Fatalf("placeholder invents details it does not have:\n%s", got)
+	}
+}
+
 func TestAttachToMIMELeavesMessagesWithNothingToAddAlone(t *testing.T) {
 	src := "From: a@b\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
 	if got := attachToMIME("msg-10", src, nil, nil); got != src {
