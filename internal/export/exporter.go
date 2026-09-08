@@ -77,6 +77,7 @@ func (e *Exporter) Run(ctx context.Context) error {
 	stop := e.startHeartbeat(ctx)
 	defer stop()
 
+	worthAnotherSweep := map[string]bool{}
 	for _, f := range folders() {
 		if !cp.Done[f.name] {
 			fmt.Printf("Exporting %s...\n", f.name)
@@ -86,18 +87,20 @@ func (e *Exporter) Run(ctx context.Context) error {
 			cp.Done[f.name] = true
 			e.saveCheckpoint(cp)
 		}
-		if err := e.retryPending(ctx, f, cp); err != nil {
+		recovered, err := e.retryPending(ctx, f, cp)
+		if err != nil {
 			return fmt.Errorf("retry %s: %w", f.name, err)
 		}
+		worthAnotherSweep[f.name] = recovered > 0
 		totals := cp.Totals[f.name]
 		fmt.Printf("  %s: %d messages, %d attachments\n", f.name, totals.Messages, totals.Attachments)
 	}
 
 	for _, f := range folders() {
-		if len(cp.Pending[f.name]) == 0 {
+		if len(cp.Pending[f.name]) == 0 || !worthAnotherSweep[f.name] {
 			continue
 		}
-		if err := e.retryPending(ctx, f, cp); err != nil {
+		if _, err := e.retryPending(ctx, f, cp); err != nil {
 			return fmt.Errorf("retry %s: %w", f.name, err)
 		}
 	}
@@ -255,26 +258,27 @@ func (e *Exporter) exportOne(ctx context.Context, folderName, messageID string, 
 	return nil
 }
 
-func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) error {
+func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) (int, error) {
 	queue := cp.Pending[f.name]
 	if len(queue) == 0 {
-		return nil
+		return 0, nil
 	}
 	file, err := e.openFolder(f, cp)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = file.Close() }()
 
+	recovered := 0
 	remaining := make([]failure, 0, len(queue))
 	for _, item := range queue {
 		if err := ctx.Err(); err != nil {
-			return err
+			return recovered, err
 		}
 		built, berr := e.buildMessage(ctx, f.name, item.MessageID)
 		if berr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
+				return recovered, ctxErr
 			}
 			item.Attempts++
 			item.Stage = stageOf(berr)
@@ -287,7 +291,7 @@ func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) e
 			continue
 		}
 		if err := writeMboxEntry(file, built.sender, built.date, built.rfc822); err != nil {
-			return err
+			return recovered, err
 		}
 		for _, l := range built.lost {
 			recordLost(cp, l)
@@ -296,6 +300,7 @@ func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) e
 		totals.Messages++
 		totals.Attachments += built.attachments
 		cp.Totals[f.name] = totals
+		recovered++
 	}
 	if len(remaining) == 0 {
 		delete(cp.Pending, f.name)
@@ -304,11 +309,11 @@ func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) e
 	}
 	pos, err := fileSize(file)
 	if err != nil {
-		return err
+		return recovered, err
 	}
 	cp.Offsets[f.name] = pos
 	e.saveCheckpoint(cp)
-	return nil
+	return recovered, nil
 }
 
 func fileSize(file *os.File) (int64, error) {
