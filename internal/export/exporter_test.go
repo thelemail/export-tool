@@ -546,3 +546,61 @@ func TestRunSurfacesNonRetryableListFailures(t *testing.T) {
 		t.Fatalf("run err = %v", err)
 	}
 }
+
+func TestFolderIsMarkedDoneInTheSameCheckpointWrite(t *testing.T) {
+	f := newFakeAPI(t)
+	key := newTestKey(t)
+	f.put("body-1", key.encrypt(t, []byte(plainBody)))
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-1"}})
+	dir := t.TempDir()
+
+	if err := newExporter(t, f, key, dir).Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".export-checkpoint.json"))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	var cp checkpoint
+	if err := json.Unmarshal(raw, &cp); err != nil {
+		t.Fatalf("decode checkpoint: %v", err)
+	}
+	if !cp.Done["inbox"] {
+		t.Fatal("inbox was not marked done")
+	}
+	if cp.Cursors["inbox"] != "" {
+		t.Fatalf("cursor = %q", cp.Cursors["inbox"])
+	}
+	if cp.Offsets["inbox"] == 0 {
+		t.Fatal("offset was not recorded")
+	}
+	if cp.Version != checkpointVersion {
+		t.Fatalf("version = %d", cp.Version)
+	}
+}
+
+func TestOldCheckpointsWithoutOffsetsStillResume(t *testing.T) {
+	f := newFakeAPI(t)
+	key := newTestKey(t)
+	f.put("body-1", key.encrypt(t, []byte(plainBody)))
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-1"}})
+	dir := t.TempDir()
+
+	legacy := `{"cursors":{"inbox":""},"done":{"inbox":true}}`
+	if err := os.WriteFile(filepath.Join(dir, ".export-checkpoint.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "inbox.mbox"), []byte("From a@b Tue Mar  4 10:11:12 2026\nold\n\n"), 0o600); err != nil {
+		t.Fatalf("seed mbox: %v", err)
+	}
+	if err := newExporter(t, f, key, dir).Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	mbox := readFile(t, filepath.Join(dir, "inbox.mbox"))
+	if !strings.Contains(mbox, "old") {
+		t.Fatalf("earlier run's output was discarded:\n%s", mbox)
+	}
+	if countEntries(mbox) != 1 {
+		t.Fatalf("expected one entry, got %d:\n%s", countEntries(mbox), mbox)
+	}
+}

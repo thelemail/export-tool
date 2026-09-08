@@ -84,8 +84,6 @@ func (e *Exporter) Run(ctx context.Context) error {
 			if err := e.exportFolder(ctx, f, cp); err != nil {
 				return fmt.Errorf("export %s: %w", f.name, err)
 			}
-			cp.Done[f.name] = true
-			e.saveCheckpoint(cp)
 		}
 		recovered, err := e.retryPending(ctx, f, cp)
 		if err != nil {
@@ -213,6 +211,7 @@ func (e *Exporter) exportFolder(ctx context.Context, f folder, cp *checkpoint) e
 		cursor = list.NextCursor
 		cp.Offsets[f.name] = pos
 		cp.Cursors[f.name] = cursor
+		cp.Done[f.name] = cursor == ""
 		e.saveCheckpoint(cp)
 		if cursor == "" {
 			return nil
