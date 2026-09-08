@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -77,7 +78,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
-			return &TransportError{Err: err}
+			return &TransportError{Err: scrub(err)}
 		}
 		defer func() { _ = resp.Body.Close() }()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
@@ -100,7 +101,7 @@ func (c *Client) GetBlob(ctx context.Context, url string) ([]byte, error) {
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
-			return &TransportError{Err: err}
+			return &TransportError{Err: scrub(err)}
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
@@ -109,7 +110,7 @@ func (c *Client) GetBlob(ctx context.Context, url string) ([]byte, error) {
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return &TransportError{Err: err}
+			return &TransportError{Err: scrub(err)}
 		}
 		return nil
 	})
@@ -183,6 +184,16 @@ func retryAfter(resp *http.Response) time.Duration {
 		}
 	}
 	return 0
+}
+
+func scrub(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if i := strings.Index(ue.URL, "?"); i >= 0 {
+			return &url.Error{Op: ue.Op, URL: ue.URL[:i], Err: ue.Err}
+		}
+	}
+	return err
 }
 
 type TransportError struct {

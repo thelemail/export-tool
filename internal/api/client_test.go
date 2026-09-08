@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,5 +134,20 @@ func TestTransportErrorsAreRetryable(t *testing.T) {
 	err := c.do(context.Background(), http.MethodGet, "/x", nil, nil)
 	if err == nil || !Retryable(err) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestTransportErrorsDropPresignedQueryStrings(t *testing.T) {
+	c := New("http://127.0.0.1:1", "")
+	c.MaxAttempts = 1
+	_, err := c.GetBlob(context.Background(), "http://127.0.0.1:1/blob/x.pgp?X-Amz-Signature=deadbeef&X-Amz-Expires=60")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "X-Amz-Signature") {
+		t.Fatalf("error leaks the presigned query: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/blob/x.pgp") {
+		t.Fatalf("error lost the object path: %v", err)
 	}
 }
