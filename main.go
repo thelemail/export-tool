@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -50,7 +51,9 @@ func main() {
 	defer cancel()
 
 	if err := run(ctx, *apiBase, *webOrigin, *email, password, *out); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		if !errors.Is(err, export.ErrIncomplete) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
 		os.Exit(1)
 	}
 }
