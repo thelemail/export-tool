@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 type OpaqueKSFParameters struct {
@@ -94,11 +95,18 @@ func (c *Client) VerifyBackupCode(ctx context.Context, pendingToken, code string
 }
 
 type PresignedPointer struct {
-	URL string `json:"url"`
+	URL            string    `json:"url"`
+	ExpiresAt      time.Time `json:"expiresAt"`
+	SizeBytes      int64     `json:"sizeBytes"`
+	SHA256         []byte    `json:"sha256"`
+	KeyFingerprint []byte    `json:"keyFingerprint"`
 }
 
 type AttachmentDetail struct {
-	Pointer PresignedPointer `json:"pointer"`
+	ID       string           `json:"id"`
+	Ordinal  int              `json:"ordinal"`
+	Pointer  PresignedPointer `json:"pointer"`
+	IsInline bool             `json:"isInline"`
 }
 
 type MessageSummary struct {
@@ -118,6 +126,8 @@ func (c *Client) ListMessages(ctx context.Context, query string) (MessageListRes
 
 type MessageDetail struct {
 	ID          string             `json:"id"`
+	Source      string             `json:"source"`
+	Encrypted   bool               `json:"encrypted"`
 	Body        PresignedPointer   `json:"body"`
 	Attachments []AttachmentDetail `json:"attachments"`
 }
