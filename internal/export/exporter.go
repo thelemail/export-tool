@@ -2,16 +2,29 @@ package export
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/thelemail/export-tool/internal/api"
+	"github.com/thelemail/export-tool/internal/attframe"
 	"github.com/thelemail/export-tool/internal/crypto"
 )
+
+const (
+	checkpointVersion = 2
+	maxPointerRefresh = 5
+)
+
+var ErrIncomplete = errors.New("export incomplete")
 
 type Exporter struct {
 	Client              *api.Client
@@ -47,8 +60,13 @@ func folders() []folder {
 }
 
 type checkpoint struct {
-	Cursors map[string]string `json:"cursors"`
-	Done    map[string]bool   `json:"done"`
+	Version int                     `json:"version"`
+	Cursors map[string]string       `json:"cursors"`
+	Done    map[string]bool         `json:"done"`
+	Offsets map[string]int64        `json:"offsets"`
+	Totals  map[string]folderTotals `json:"totals"`
+	Pending map[string][]failure    `json:"pending"`
+	Lost    []failure               `json:"lost"`
 }
 
 func (e *Exporter) Run(ctx context.Context) error {
@@ -59,40 +77,113 @@ func (e *Exporter) Run(ctx context.Context) error {
 	stop := e.startHeartbeat(ctx)
 	defer stop()
 
+	worthAnotherSweep := map[string]bool{}
 	for _, f := range folders() {
-		if cp.Done[f.name] {
+		if !cp.Done[f.name] {
+			fmt.Printf("Exporting %s...\n", f.name)
+			if err := e.exportFolder(ctx, f, cp); err != nil {
+				return fmt.Errorf("export %s: %w", f.name, err)
+			}
+		}
+		recovered, err := e.retryPending(ctx, f, cp)
+		if err != nil {
+			return fmt.Errorf("retry %s: %w", f.name, err)
+		}
+		worthAnotherSweep[f.name] = recovered > 0
+		totals := cp.Totals[f.name]
+		fmt.Printf("  %s: %d messages, %d attachments\n", f.name, totals.Messages, totals.Attachments)
+	}
+
+	for _, f := range folders() {
+		if len(cp.Pending[f.name]) == 0 || !worthAnotherSweep[f.name] {
 			continue
 		}
-		fmt.Printf("Exporting %s...\n", f.name)
-		if err := e.exportFolder(ctx, f, cp); err != nil {
-			return fmt.Errorf("export %s: %w", f.name, err)
+		if _, err := e.retryPending(ctx, f, cp); err != nil {
+			return fmt.Errorf("retry %s: %w", f.name, err)
 		}
-		cp.Done[f.name] = true
-		e.saveCheckpoint(cp)
 	}
+
 	if err := e.writeKeyMaterial(); err != nil {
 		return err
 	}
 	if err := e.writeSettings(ctx); err != nil {
 		return err
 	}
+
+	r := buildReport(cp, time.Now().UTC())
+	if err := writeReport(e.OutDir, r); err != nil {
+		return err
+	}
+	if !r.Complete {
+		e.printIncomplete(r)
+		return ErrIncomplete
+	}
 	if e.Session != "" {
-		_ = e.Client.ExportComplete(ctx, e.Session)
+		if err := e.Client.ExportComplete(ctx, e.Session); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not close the export session: %v\n", err)
+		}
 	}
 	fmt.Printf("Done. Files written to %s\n", e.OutDir)
 	return nil
 }
 
-func (e *Exporter) exportFolder(ctx context.Context, f folder, cp *checkpoint) error {
+func (e *Exporter) printIncomplete(r report) {
+	fmt.Println()
+	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read.\n", len(r.Pending), len(r.Lost))
+	printFailures("could not fetch", r.Pending)
+	printFailures("could not read", r.Lost)
+	fmt.Printf("\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
+	if len(r.Pending) > 0 {
+		fmt.Println("Re-run the same command with the same --out to retry those.")
+	}
+	fmt.Println("The export session is still open, so a scheduled deletion stays on hold.")
+}
+
+func printFailures(label string, items []failure) {
+	const shown = 10
+	for i, f := range items {
+		if i == shown {
+			fmt.Printf("  ... and %d more\n", len(items)-shown)
+			break
+		}
+		where := f.MessageID
+		if f.AttachmentID != "" {
+			where += " " + f.Stage + " " + f.AttachmentID
+		} else {
+			where += " " + f.Stage
+		}
+		fmt.Printf("  %s %s/%s: %s\n", label, f.Folder, where, f.Error)
+	}
+}
+
+func (e *Exporter) openFolder(f folder, cp *checkpoint) (*os.File, error) {
 	path := filepath.Join(e.OutDir, f.name+".mbox")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	offset, known := cp.Offsets[f.name]
+	if known {
+		if err := file.Truncate(offset); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func (e *Exporter) exportFolder(ctx context.Context, f folder, cp *checkpoint) error {
+	file, err := e.openFolder(f, cp)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = file.Close() }()
 
 	cursor := cp.Cursors[f.name]
-	total := 0
 	for {
 		params := url.Values{}
 		for k, vs := range f.params {
@@ -106,48 +197,328 @@ func (e *Exporter) exportFolder(ctx context.Context, f folder, cp *checkpoint) e
 			return err
 		}
 		for _, m := range list.Items {
-			rfc822, sender, date, derr := e.decryptMessage(ctx, m.ID)
-			if derr != nil {
-				fmt.Printf("  skip %s: %v\n", m.ID, derr)
-				continue
-			}
-			if err := writeMboxEntry(file, sender, date, rfc822); err != nil {
+			if err := ctx.Err(); err != nil {
 				return err
 			}
-			total++
+			if err := e.exportOne(ctx, f.name, m.ID, file, cp); err != nil {
+				return err
+			}
+		}
+		pos, err := fileSize(file)
+		if err != nil {
+			return err
 		}
 		cursor = list.NextCursor
+		cp.Offsets[f.name] = pos
 		cp.Cursors[f.name] = cursor
+		cp.Done[f.name] = cursor == ""
 		e.saveCheckpoint(cp)
 		if cursor == "" {
-			break
+			return nil
 		}
 	}
-	fmt.Printf("  %s: %d messages\n", f.name, total)
+}
+
+func (e *Exporter) exportOne(ctx context.Context, folderName, messageID string, file *os.File, cp *checkpoint) error {
+	built, err := e.buildMessage(ctx, folderName, messageID)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if api.Retryable(err) {
+			recordPending(cp, failure{
+				Folder:    folderName,
+				MessageID: messageID,
+				Stage:     stageOf(err),
+				Attempts:  1,
+				Error:     err.Error(),
+			})
+			return nil
+		}
+		recordLost(cp, failure{
+			Folder:    folderName,
+			MessageID: messageID,
+			Stage:     stageOf(err),
+			Attempts:  1,
+			Error:     err.Error(),
+		})
+		return nil
+	}
+	if err := writeMboxEntry(file, built.sender, built.date, built.rfc822); err != nil {
+		return err
+	}
+	for _, l := range built.lost {
+		recordLost(cp, l)
+	}
+	totals := cp.Totals[folderName]
+	totals.Messages++
+	totals.Attachments += built.attachments
+	cp.Totals[folderName] = totals
 	return nil
 }
 
-func (e *Exporter) decryptMessage(ctx context.Context, id string) (string, string, time.Time, error) {
-	detail, err := e.Client.GetMessage(ctx, id)
-	if err != nil {
-		return "", "", time.Time{}, err
+func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) (int, error) {
+	queue := cp.Pending[f.name]
+	if len(queue) == 0 {
+		return 0, nil
 	}
-	cipher, err := e.Client.GetBlob(ctx, detail.Body.URL)
+	file, err := e.openFolder(f, cp)
 	if err != nil {
-		return "", "", time.Time{}, err
+		return 0, err
+	}
+	defer func() { _ = file.Close() }()
+
+	recovered := 0
+	remaining := make([]failure, 0, len(queue))
+	for _, item := range queue {
+		if err := ctx.Err(); err != nil {
+			return recovered, err
+		}
+		built, berr := e.buildMessage(ctx, f.name, item.MessageID)
+		if berr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return recovered, ctxErr
+			}
+			item.Attempts++
+			item.Stage = stageOf(berr)
+			item.Error = berr.Error()
+			if api.Retryable(berr) {
+				remaining = append(remaining, item)
+			} else {
+				recordLost(cp, item)
+			}
+			continue
+		}
+		if err := writeMboxEntry(file, built.sender, built.date, built.rfc822); err != nil {
+			return recovered, err
+		}
+		for _, l := range built.lost {
+			recordLost(cp, l)
+		}
+		totals := cp.Totals[f.name]
+		totals.Messages++
+		totals.Attachments += built.attachments
+		cp.Totals[f.name] = totals
+		recovered++
+	}
+	if len(remaining) == 0 {
+		delete(cp.Pending, f.name)
+	} else {
+		cp.Pending[f.name] = remaining
+	}
+	pos, err := fileSize(file)
+	if err != nil {
+		return recovered, err
+	}
+	cp.Offsets[f.name] = pos
+	e.saveCheckpoint(cp)
+	return recovered, nil
+}
+
+func fileSize(file *os.File) (int64, error) {
+	st, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
+}
+
+type builtMessage struct {
+	rfc822      string
+	sender      string
+	date        time.Time
+	attachments int
+	lost        []failure
+}
+
+type stagedError struct {
+	stage string
+	err   error
+}
+
+func (s *stagedError) Error() string { return s.err.Error() }
+func (s *stagedError) Unwrap() error { return s.err }
+
+func stageOf(err error) string {
+	var se *stagedError
+	if errors.As(err, &se) {
+		return se.stage
+	}
+	return "message"
+}
+
+func staged(stage string, err error) error {
+	return &stagedError{stage: stage, err: err}
+}
+
+func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID string) (builtMessage, error) {
+	mf := &messageFetch{client: e.Client, id: messageID}
+	if err := mf.load(ctx); err != nil {
+		return builtMessage{}, staged("detail", err)
+	}
+
+	cipher, err := mf.fetch(ctx, "")
+	if err != nil {
+		return builtMessage{}, staged("body", err)
 	}
 	plain, err := e.Vault.Decrypt(cipher)
 	if err != nil {
-		return "", "", time.Time{}, err
+		return builtMessage{}, staged("body", err)
 	}
 	mimeStr := unwrapPgpMime(e.Vault, string(plain))
-	date := time.Now()
-	if raw := headerValue(mimeStr, "Date"); raw != "" {
-		if t, perr := time.Parse(time.RFC1123Z, raw); perr == nil {
-			date = t
+
+	attachments := append([]api.AttachmentDetail(nil), mf.detail.Attachments...)
+	sort.Slice(attachments, func(i, j int) bool { return attachments[i].Ordinal < attachments[j].Ordinal })
+
+	parts := make([]attachedPart, 0, len(attachments))
+	var lostParts []lostPart
+	var lost []failure
+	for _, a := range attachments {
+		var header attframe.Header
+		var payload []byte
+		raw, err := mf.fetch(ctx, a.ID)
+		if err == nil {
+			header, payload, err = e.openAttachment(raw)
+		}
+		if err != nil {
+			if api.Retryable(err) {
+				return builtMessage{}, staged("attachment", err)
+			}
+			lostParts = append(lostParts, lostPart{
+				ordinal:     a.Ordinal,
+				filename:    header.Filename,
+				contentType: header.ContentType,
+				sizeBytes:   header.PlaintextSize,
+				reason:      err.Error(),
+			})
+			lost = append(lost, failure{
+				Folder:       folderName,
+				MessageID:    messageID,
+				Stage:        "attachment",
+				AttachmentID: a.ID,
+				Filename:     header.Filename,
+				Attempts:     1,
+				Error:        err.Error(),
+			})
+			continue
+		}
+		parts = append(parts, attachedPart{header: header, payload: payload})
+	}
+
+	assembled := attachToMIME(messageID, mimeStr, parts, lostParts)
+	date := time.Now().UTC()
+	if t, ok := messageDate(assembled); ok {
+		date = t
+	}
+	return builtMessage{
+		rfc822:      assembled,
+		sender:      senderAddress(assembled),
+		date:        date,
+		attachments: len(parts),
+		lost:        lost,
+	}, nil
+}
+
+func (e *Exporter) openAttachment(raw []byte) (attframe.Header, []byte, error) {
+	plain, err := e.Vault.Decrypt(raw)
+	if err != nil {
+		return attframe.Header{}, nil, err
+	}
+	header, payload, err := attframe.Parse(plain)
+	if err == nil {
+		return header, payload, nil
+	}
+	if partial, herr := attframe.ParseHeader(plain); herr == nil {
+		return partial, nil, err
+	}
+	return attframe.Header{}, nil, err
+}
+
+type messageFetch struct {
+	client    *api.Client
+	id        string
+	detail    api.MessageDetail
+	refreshes int
+}
+
+func (m *messageFetch) load(ctx context.Context) error {
+	detail, err := m.client.GetMessage(ctx, m.id)
+	if err != nil {
+		return err
+	}
+	m.detail = detail
+	return nil
+}
+
+func (m *messageFetch) pointer(attachmentID string) (api.PresignedPointer, bool) {
+	if attachmentID == "" {
+		return m.detail.Body, true
+	}
+	for _, a := range m.detail.Attachments {
+		if a.ID == attachmentID {
+			return a.Pointer, true
 		}
 	}
-	return mimeStr, senderAddress(mimeStr), date, nil
+	return api.PresignedPointer{}, false
+}
+
+func (m *messageFetch) fetch(ctx context.Context, attachmentID string) ([]byte, error) {
+	ptr, ok := m.pointer(attachmentID)
+	if !ok {
+		return nil, fmt.Errorf("attachment %s vanished from the message", attachmentID)
+	}
+	raw, err := m.client.GetBlob(ctx, ptr.URL)
+	if err == nil {
+		return raw, verifyCiphertext(ptr, raw)
+	}
+	if !api.IsExpiredPointer(err) || m.refreshes >= maxPointerRefresh {
+		return nil, err
+	}
+	m.refreshes++
+	if lerr := m.load(ctx); lerr != nil {
+		return nil, lerr
+	}
+	ptr, ok = m.pointer(attachmentID)
+	if !ok {
+		return nil, err
+	}
+	raw, err = m.client.GetBlob(ctx, ptr.URL)
+	if err != nil {
+		return nil, err
+	}
+	return raw, verifyCiphertext(ptr, raw)
+}
+
+func verifyCiphertext(ptr api.PresignedPointer, raw []byte) error {
+	if len(ptr.SHA256) == 0 {
+		return nil
+	}
+	sum := sha256.Sum256(raw)
+	if subtle.ConstantTimeCompare(sum[:], ptr.SHA256) != 1 {
+		return errors.New("ciphertext checksum does not match the server's record")
+	}
+	return nil
+}
+
+func recordPending(cp *checkpoint, f failure) {
+	for i, existing := range cp.Pending[f.Folder] {
+		if existing.MessageID == f.MessageID {
+			f.Attempts += existing.Attempts
+			cp.Pending[f.Folder][i] = f
+			return
+		}
+	}
+	cp.Pending[f.Folder] = append(cp.Pending[f.Folder], f)
+}
+
+func recordLost(cp *checkpoint, f failure) {
+	for i, existing := range cp.Lost {
+		if existing.MessageID == f.MessageID && existing.AttachmentID == f.AttachmentID {
+			cp.Lost[i] = f
+			return
+		}
+	}
+	cp.Lost = append(cp.Lost, f)
 }
 
 func (e *Exporter) writeKeyMaterial() error {
@@ -179,17 +550,26 @@ func (e *Exporter) writeSettings(ctx context.Context) error {
 func (e *Exporter) checkpointPath() string { return filepath.Join(e.OutDir, ".export-checkpoint.json") }
 
 func (e *Exporter) loadCheckpoint() *checkpoint {
-	cp := &checkpoint{Cursors: map[string]string{}, Done: map[string]bool{}}
+	cp := &checkpoint{Version: checkpointVersion}
 	raw, err := os.ReadFile(e.checkpointPath())
-	if err != nil {
-		return cp
+	if err == nil {
+		_ = json.Unmarshal(raw, cp)
 	}
-	_ = json.Unmarshal(raw, cp)
+	cp.Version = checkpointVersion
 	if cp.Cursors == nil {
 		cp.Cursors = map[string]string{}
 	}
 	if cp.Done == nil {
 		cp.Done = map[string]bool{}
+	}
+	if cp.Offsets == nil {
+		cp.Offsets = map[string]int64{}
+	}
+	if cp.Totals == nil {
+		cp.Totals = map[string]folderTotals{}
+	}
+	if cp.Pending == nil {
+		cp.Pending = map[string][]failure{}
 	}
 	return cp
 }
