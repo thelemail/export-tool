@@ -118,27 +118,41 @@ func (e *Exporter) Run(ctx context.Context) error {
 		return ErrIncomplete
 	}
 	if e.Session != "" {
-		_ = e.Client.ExportComplete(ctx, e.Session)
+		if err := e.Client.ExportComplete(ctx, e.Session); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not close the export session: %v\n", err)
+		}
 	}
 	fmt.Printf("Done. Files written to %s\n", e.OutDir)
 	return nil
 }
 
 func (e *Exporter) printIncomplete(r report) {
-	pending, lost := len(r.Pending), len(r.Lost)
 	fmt.Println()
-	fmt.Printf("Incomplete. %d item(s) could not be fetched and %d could not be decrypted.\n", pending, lost)
-	for _, f := range r.Pending {
-		fmt.Printf("  retryable  %s %s %s: %s\n", f.Folder, f.MessageID, f.Stage, f.Error)
+	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read.\n", len(r.Pending), len(r.Lost))
+	printFailures("could not fetch", r.Pending)
+	printFailures("could not read", r.Lost)
+	fmt.Printf("\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
+	if len(r.Pending) > 0 {
+		fmt.Println("Re-run the same command with the same --out to retry those.")
 	}
-	for _, f := range r.Lost {
-		fmt.Printf("  unreadable %s %s %s: %s\n", f.Folder, f.MessageID, f.Stage, f.Error)
+	fmt.Println("The export session is still open, so a scheduled deletion stays on hold.")
+}
+
+func printFailures(label string, items []failure) {
+	const shown = 10
+	for i, f := range items {
+		if i == shown {
+			fmt.Printf("  ... and %d more\n", len(items)-shown)
+			break
+		}
+		where := f.MessageID
+		if f.AttachmentID != "" {
+			where += " " + f.Stage + " " + f.AttachmentID
+		} else {
+			where += " " + f.Stage
+		}
+		fmt.Printf("  %s %s/%s: %s\n", label, f.Folder, where, f.Error)
 	}
-	fmt.Printf("\nEverything is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
-	if pending > 0 {
-		fmt.Println("Re-run the same command to retry the retryable ones.")
-	}
-	fmt.Println("The export session was left open, so a scheduled deletion stays on hold.")
 }
 
 func (e *Exporter) openFolder(f folder, cp *checkpoint) (*os.File, error) {
