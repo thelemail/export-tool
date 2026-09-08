@@ -13,7 +13,28 @@ In the output directory, all written with owner-only permissions:
 | `inbox.mbox`, `sent.mbox`, `archive.mbox`, `spam.mbox`, `trash.mbox`, `starred.mbox` | Each folder as a standard mboxrd MBOX file that imports into Apple Mail, Thunderbird, and other clients |
 | `private-key-encrypted.asc` | Your private key, still encrypted under the passphrase only your password can derive. Never written in the clear |
 | `settings.json` | Your account settings and addresses |
+| `export-report.json` | What the export contains, and anything it could not get |
 | `.export-checkpoint.json` | Resume state. Safe to delete once the export is done |
+
+Attachments are put back into the message they belong to, so every `.mbox` file is
+self-contained and an imported message carries its files exactly as it did here. Thelemail
+stores attachments as separate encrypted objects rather than inside the message body, so the
+tool fetches and decrypts each one and reassembles the MIME message locally.
+
+## When something is missing
+
+The export never claims to be finished when it is not.
+
+Anything the tool could not fetch (a network drop, a rate limit, a server error) is held back
+rather than half-written, and listed under `pending` in `export-report.json`. It retries during
+the run, and **re-running the same command with the same `--out` retries whatever is left**.
+
+Anything it could fetch but could not read, such as ciphertext that does not decrypt, is listed
+under `lost`. The message is still written, with a short note in place of the attachment naming
+what is missing.
+
+While either list has anything in it the tool exits non-zero, leaves the server-side export
+session open so a scheduled deletion stays on hold, and does not report the export as complete.
 
 ## Usage
 
