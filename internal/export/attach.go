@@ -29,6 +29,9 @@ type lostPart struct {
 }
 
 func attachToMIME(messageID, mimeStr string, atts []attachedPart, lost []lostPart) string {
+	if len(atts) == 0 && len(lost) == 0 {
+		return mimeStr
+	}
 	names, cids := existingParts(mimeStr)
 	pending := make([]attachedPart, 0, len(atts))
 	for _, a := range atts {
