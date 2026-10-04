@@ -11,6 +11,8 @@ In the output directory, all written with owner-only permissions:
 | File | Contents |
 | --- | --- |
 | `inbox.mbox`, `sent.mbox`, `archive.mbox`, `spam.mbox`, `trash.mbox`, `starred.mbox` | Each folder as a standard mboxrd MBOX file that imports into Apple Mail, Thunderbird, and other clients |
+| `folder <name> <id>.mbox` | One MBOX file per folder you made, named after its full path |
+| `organization.json` | Your folders and labels with their names, colors and nesting, and which labels each message carries, matched by its `Message-ID` |
 | `private-key-encrypted.asc` | Your private key, still encrypted under the passphrase only your password can derive. Never written in the clear |
 | `settings.json` | Your account settings and addresses |
 | `export-report.json` | What the export contains, and anything it could not get |
