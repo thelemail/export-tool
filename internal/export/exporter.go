@@ -66,6 +66,7 @@ type checkpoint struct {
 	Offsets map[string]int64        `json:"offsets"`
 	Totals  map[string]folderTotals `json:"totals"`
 	Pending map[string][]failure    `json:"pending"`
+	Labels  map[string]labelRecord  `json:"labels,omitempty"`
 	Lost    []failure               `json:"lost"`
 }
 
@@ -77,8 +78,14 @@ func (e *Exporter) Run(ctx context.Context) error {
 	stop := e.startHeartbeat(ctx)
 	defer stop()
 
+	org, err := e.loadOrganization(ctx)
+	if err != nil {
+		return fmt.Errorf("load folders and labels: %w", err)
+	}
+	all := append(folders(), customFolders(org)...)
+
 	worthAnotherSweep := map[string]bool{}
-	for _, f := range folders() {
+	for _, f := range all {
 		if !cp.Done[f.name] {
 			fmt.Printf("Exporting %s...\n", f.name)
 			if err := e.exportFolder(ctx, f, cp); err != nil {
@@ -94,7 +101,7 @@ func (e *Exporter) Run(ctx context.Context) error {
 		fmt.Printf("  %s: %d messages, %d attachments\n", f.name, totals.Messages, totals.Attachments)
 	}
 
-	for _, f := range folders() {
+	for _, f := range all {
 		if len(cp.Pending[f.name]) == 0 || !worthAnotherSweep[f.name] {
 			continue
 		}
@@ -109,8 +116,11 @@ func (e *Exporter) Run(ctx context.Context) error {
 	if err := e.writeSettings(ctx); err != nil {
 		return err
 	}
+	if err := e.writeOrganization(org, cp); err != nil {
+		return err
+	}
 
-	r := buildReport(cp, time.Now().UTC())
+	r := buildReport(cp, all, time.Now().UTC())
 	if err := writeReport(e.OutDir, r); err != nil {
 		return err
 	}
@@ -200,6 +210,9 @@ func (e *Exporter) exportFolder(ctx context.Context, f folder, cp *checkpoint) e
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if len(m.LabelIDs) > 0 {
+				cp.Labels[m.ID] = labelRecord{LabelIDs: m.LabelIDs}
+			}
 			if err := e.exportOne(ctx, f.name, m.ID, file, cp); err != nil {
 				return err
 			}
@@ -247,6 +260,7 @@ func (e *Exporter) exportOne(ctx context.Context, folderName, messageID string, 
 	if err := writeMboxEntry(file, built.sender, built.date, built.rfc822); err != nil {
 		return err
 	}
+	noteMessageIDHeader(cp, messageID, built.rfc822)
 	for _, l := range built.lost {
 		recordLost(cp, l)
 	}
@@ -292,6 +306,7 @@ func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) (
 		if err := writeMboxEntry(file, built.sender, built.date, built.rfc822); err != nil {
 			return recovered, err
 		}
+		noteMessageIDHeader(cp, item.MessageID, built.rfc822)
 		for _, l := range built.lost {
 			recordLost(cp, l)
 		}
@@ -570,6 +585,9 @@ func (e *Exporter) loadCheckpoint() *checkpoint {
 	}
 	if cp.Pending == nil {
 		cp.Pending = map[string][]failure{}
+	}
+	if cp.Labels == nil {
+		cp.Labels = map[string]labelRecord{}
 	}
 	return cp
 }

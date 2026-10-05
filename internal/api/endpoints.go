@@ -110,7 +110,8 @@ type AttachmentDetail struct {
 }
 
 type MessageSummary struct {
-	ID string `json:"id"`
+	ID       string   `json:"id"`
+	LabelIDs []string `json:"labelIds"`
 }
 
 type MessageListResponse struct {
@@ -136,6 +137,25 @@ func (c *Client) GetMessage(ctx context.Context, id string) (MessageDetail, erro
 	var out MessageDetail
 	err := c.do(ctx, http.MethodGet, "/v1/messages/"+id, nil, &out)
 	return out, err
+}
+
+type MailCollection struct {
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	ParentID   string `json:"parentId"`
+	Position   int64  `json:"position"`
+	SealedMeta []byte `json:"sealedMeta"`
+	Deleted    bool   `json:"deleted"`
+}
+
+type MailCollectionListResponse struct {
+	Collections []MailCollection `json:"collections"`
+}
+
+func (c *Client) ListMailCollections(ctx context.Context) ([]MailCollection, error) {
+	var out MailCollectionListResponse
+	err := c.do(ctx, http.MethodGet, "/v1/mail/collections", nil, &out)
+	return out.Collections, err
 }
 
 func (c *Client) AccountSettings(ctx context.Context) (json.RawMessage, error) {

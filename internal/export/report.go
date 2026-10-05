@@ -38,9 +38,9 @@ type report struct {
 	Lost        []failure      `json:"lost"`
 }
 
-func buildReport(cp *checkpoint, now time.Time) report {
+func buildReport(cp *checkpoint, list []folder, now time.Time) report {
 	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}}
-	for _, f := range folders() {
+	for _, f := range list {
 		lost := 0
 		for _, l := range cp.Lost {
 			if l.Folder == f.name {

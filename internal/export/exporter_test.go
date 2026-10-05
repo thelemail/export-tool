@@ -31,6 +31,7 @@ type fakeMessage struct {
 	id          string
 	bodyKey     string
 	attachments []fakeAttachment
+	labelIDs    []string
 }
 
 type fakeAPI struct {
@@ -43,6 +44,7 @@ type fakeAPI struct {
 	pages       map[string][][]fakeMessage
 	messages    map[string]fakeMessage
 	listStatus  map[string]int
+	collections []map[string]any
 	epoch       int
 	bumpOnFetch bool
 	completed   bool
@@ -100,6 +102,11 @@ func (f *fakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		f.serveList(w, r)
 	case strings.HasPrefix(r.URL.Path, "/v1/messages/"):
 		f.serveDetail(w, r)
+	case r.URL.Path == "/v1/mail/collections":
+		f.mu.Lock()
+		cols := append([]map[string]any{}, f.collections...)
+		f.mu.Unlock()
+		writeJSON(w, map[string]any{"collections": cols})
 	case r.URL.Path == "/v1/account/settings":
 		writeJSON(w, map[string]string{"theme": "pine"})
 	case r.URL.Path == "/v1/me/addresses":
@@ -143,6 +150,8 @@ func folderOf(q url.Values) string {
 	switch {
 	case q.Get("starred") == "true":
 		return "starred"
+	case q.Get("mailbox") == "folder":
+		return "folder:" + q.Get("folderId")
 	case q.Get("mailbox") != "":
 		return q.Get("mailbox")
 	case q.Get("direction") == "sent":
@@ -166,11 +175,11 @@ func (f *fakeAPI) serveList(w http.ResponseWriter, r *http.Request) {
 	if c := r.URL.Query().Get("cursor"); c != "" {
 		_, _ = fmt.Sscanf(c, "page-%d", &index)
 	}
-	items := []map[string]string{}
+	items := []map[string]any{}
 	next := ""
 	if index < len(pages) {
 		for _, m := range pages[index] {
-			items = append(items, map[string]string{"id": m.id})
+			items = append(items, map[string]any{"id": m.id, "labelIds": m.labelIDs})
 		}
 		if index+1 < len(pages) {
 			next = fmt.Sprintf("page-%d", index+1)
@@ -602,5 +611,77 @@ func TestOldCheckpointsWithoutOffsetsStillResume(t *testing.T) {
 	}
 	if countEntries(mbox) != 1 {
 		t.Fatalf("expected one entry, got %d:\n%s", countEntries(mbox), mbox)
+	}
+}
+
+func (f *fakeAPI) collection(t *testing.T, key *testKey, id, kind, parentID, meta string, deleted bool) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.collections = append(f.collections, map[string]any{
+		"id":         id,
+		"kind":       kind,
+		"parentId":   parentID,
+		"position":   1024,
+		"sealedMeta": key.encrypt(t, []byte(meta)),
+		"deleted":    deleted,
+	})
+}
+
+const labelledBody = "From: Alice <alice@example.com>\r\n" +
+	"To: me@thelemail.com\r\n" +
+	"Subject: Acme contract\r\n" +
+	"Message-ID: <contract-1@example.com>\r\n" +
+	"Date: Tue, 04 Mar 2026 10:11:12 +0000\r\n" +
+	"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+	"signed copy\r\n"
+
+func TestRunExportsCustomFoldersAndTheirLabels(t *testing.T) {
+	f := newFakeAPI(t)
+	key := newTestKey(t)
+	f.collection(t, key, "11111111-aaaa", "folder", "", `{"n":"Clients","c":null}`, false)
+	f.collection(t, key, "22222222-bbbb", "folder", "11111111-aaaa", `{"n":"Acme / Co","c":"pine"}`, false)
+	f.collection(t, key, "33333333-cccc", "folder", "", `{"n":"Gone","c":null}`, true)
+	f.collection(t, key, "44444444-dddd", "label", "", `{"n":"Tax 2026","c":"brass"}`, false)
+	f.put("body-1", key.encrypt(t, []byte(labelledBody)))
+	f.add("folder:22222222-bbbb", []fakeMessage{{id: "m1", bodyKey: "body-1", labelIDs: []string{"44444444-dddd"}}})
+	dir := t.TempDir()
+
+	if err := newExporter(t, f, key, dir).Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	mbox := readFile(t, filepath.Join(dir, "folder Clients - Acme - Co 22222222.mbox"))
+	if countEntries(mbox) != 1 || !strings.Contains(mbox, "Subject: Acme contract") {
+		t.Fatalf("custom folder mbox:\n%s", mbox)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "folder Gone 33333333.mbox")); !os.IsNotExist(err) {
+		t.Fatalf("a deleted folder was exported: %v", err)
+	}
+
+	var org organization
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, "organization.json"))), &org); err != nil {
+		t.Fatalf("decode organization: %v", err)
+	}
+	if len(org.Folders) != 2 || org.Folders[1].Path != "Clients / Acme / Co" || org.Folders[1].Color != "pine" {
+		t.Fatalf("folders = %+v", org.Folders)
+	}
+	if len(org.Labels) != 1 || org.Labels[0].Name != "Tax 2026" {
+		t.Fatalf("labels = %+v", org.Labels)
+	}
+	if len(org.Messages) != 1 || org.Messages[0].MessageIDHeader != "<contract-1@example.com>" ||
+		len(org.Messages[0].LabelIDs) != 1 || org.Messages[0].LabelIDs[0] != "44444444-dddd" {
+		t.Fatalf("messages = %+v", org.Messages)
+	}
+
+	r := readReport(t, dir)
+	var reported bool
+	for _, fr := range r.Folders {
+		if fr.Name == "folder Clients - Acme - Co 22222222" && fr.Messages == 1 {
+			reported = true
+		}
+	}
+	if !r.Complete || !reported {
+		t.Fatalf("report = %+v", r)
 	}
 }
