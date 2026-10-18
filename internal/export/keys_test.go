@@ -210,14 +210,15 @@ func TestUnlockAccountKeysReportsHistoryKeysThatDoNotUnlock(t *testing.T) {
 func TestUnlockAccountKeysRejectsAnInconsistentList(t *testing.T) {
 	h := newKeyHistory(t)
 	cases := map[string]func(r *api.AccountKeysResponse){
-		"empty":               func(r *api.AccountKeysResponse) { r.Keys = nil },
-		"no current":          func(r *api.AccountKeysResponse) { r.Keys[0].IsCurrent = false },
-		"two current":         func(r *api.AccountKeysResponse) { r.Keys[2].IsCurrent = true },
-		"version above":       func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 4 },
-		"duplicate version":   func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 2 },
-		"duplicate key":       func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = r.Keys[2].KeyFingerprint },
-		"path in fingerprint": func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = "../../" + strings.Repeat("a", 34) },
-		"wrong fingerprint":   func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.Repeat("a", 40) },
+		"empty":                 func(r *api.AccountKeysResponse) { r.Keys = nil },
+		"no current":            func(r *api.AccountKeysResponse) { r.Keys[0].IsCurrent = false },
+		"two current":           func(r *api.AccountKeysResponse) { r.Keys[2].IsCurrent = true },
+		"version above":         func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 4 },
+		"duplicate version":     func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 2 },
+		"duplicate key":         func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = r.Keys[2].KeyFingerprint },
+		"path in fingerprint":   func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = "../../" + strings.Repeat("a", 34) },
+		"wrong fingerprint":     func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.Repeat("a", 40) },
+		"uppercase fingerprint": func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.ToUpper(r.Keys[1].KeyFingerprint) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

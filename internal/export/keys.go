@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/thelemail/export-tool/internal/api"
@@ -79,7 +78,7 @@ func checkKeyList(resp api.AccountKeysResponse) ([]AccountKey, error) {
 	current := 0
 	keys := make([]AccountKey, 0, len(resp.Keys))
 	for _, k := range resp.Keys {
-		fp := strings.ToLower(k.KeyFingerprint)
+		fp := k.KeyFingerprint
 		switch {
 		case k.KeyVersion < 1 || k.KeyVersion > resp.CurrentVersion:
 			return nil, fmt.Errorf("key list: invalid key version %d", k.KeyVersion)
