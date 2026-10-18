@@ -120,7 +120,7 @@ func (e *Exporter) Run(ctx context.Context) error {
 		return err
 	}
 
-	r := buildReport(cp, all, e.keyWarnings(), time.Now().UTC())
+	r := buildReport(cp, all, e.keyWarnings(), e.recheckKeys(ctx), time.Now().UTC())
 	if err := writeReport(e.OutDir, r); err != nil {
 		return err
 	}
@@ -144,6 +144,9 @@ func (e *Exporter) printIncomplete(r report) {
 	printFailures("could not read", r.Lost)
 	for _, k := range r.KeyWarnings {
 		fmt.Printf("  key version %d (%s) could not be unlocked: %s\n", k.Version, k.Fingerprint, k.Error)
+	}
+	if r.KeyCheck != "" {
+		fmt.Printf("  %s\n", r.KeyCheck)
 	}
 	fmt.Printf("\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
 	if len(r.Pending) > 0 {

@@ -1,6 +1,7 @@
 package export
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -230,4 +231,30 @@ func (e *Exporter) keyWarnings() []keyManifestEntry {
 		}
 	}
 	return out
+}
+
+const keysChanged = "your keys changed during the export, run it again"
+
+func (e *Exporter) recheckKeys(ctx context.Context) string {
+	resp, err := e.Client.ListMyKeys(ctx)
+	if err != nil {
+		return fmt.Sprintf("could not check your keys again, run it again: %v", err)
+	}
+	fresh, err := checkKeyList(resp)
+	if err != nil {
+		return err.Error()
+	}
+	if len(fresh) != len(e.Keys) {
+		return keysChanged
+	}
+	exported := map[int]string{}
+	for _, k := range e.Keys {
+		exported[k.Version] = k.Fingerprint
+	}
+	for _, k := range fresh {
+		if fp, ok := exported[k.Version]; !ok || fp != k.Fingerprint {
+			return keysChanged
+		}
+	}
+	return ""
 }

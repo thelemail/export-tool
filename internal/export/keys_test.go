@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -276,6 +277,9 @@ func historyExporter(t *testing.T, f *fakeAPI, resp api.AccountKeysResponse, dir
 	client.MaxAttempts = 2
 	client.Backoff = time.Millisecond
 	client.SetSession("token", "account")
+	f.mu.Lock()
+	f.keys = resp
+	f.mu.Unlock()
 	return &Exporter{Client: client, Vault: vault, OutDir: dir, Session: "sess-1", Keys: keys}
 }
 
@@ -442,5 +446,71 @@ func TestRunKeepsTheSessionOpenWhenAnOldKeyDoesNotUnlock(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(dir, "private-keys", "1-"+locked.fingerprint()+".asc")); got != normalize(locked.private) {
 		t.Fatal("the locked key was not written out")
+	}
+}
+
+func TestRunKeepsTheSessionOpenWhenTheKeysChangeDuringTheExport(t *testing.T) {
+	cases := map[string]struct {
+		change func(t *testing.T, f *fakeAPI, h keyHistory)
+		want   string
+	}{
+		"rotated": {func(t *testing.T, f *fakeAPI, h keyHistory) {
+			next := newAccountKey(t, v6KeyConfig, vaultPassphrase)
+			retired := listed(3, false, h.current)
+			f.keys = api.AccountKeysResponse{CurrentVersion: 4, Keys: []api.AccountKey{listed(4, true, next), retired, h.resp.Keys[1], h.resp.Keys[2]}}
+		}, keysChanged},
+		"replaced": {func(t *testing.T, f *fakeAPI, h keyHistory) {
+			other := listed(1, false, newAccountKey(t, v4KeyConfig, vaultPassphrase))
+			f.keys = api.AccountKeysResponse{CurrentVersion: 3, Keys: []api.AccountKey{h.resp.Keys[0], other, h.resp.Keys[2]}}
+		}, keysChanged},
+		"invalid": {func(t *testing.T, f *fakeAPI, h keyHistory) {
+			f.keys = api.AccountKeysResponse{CurrentVersion: 3, Keys: []api.AccountKey{h.resp.Keys[0], h.resp.Keys[1]}}
+		}, "key version 2 is missing"},
+		"unreachable": {func(t *testing.T, f *fakeAPI, h keyHistory) {
+			f.keysStatus = http.StatusForbidden
+		}, "could not check your keys again"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newKeyHistory(t)
+			f := newFakeAPI(t)
+			f.put("body-now", h.current.encrypt(t, mailBody("Now")))
+			f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+			dir := t.TempDir()
+			e := historyExporter(t, f, h.resp, dir)
+			f.mu.Lock()
+			tc.change(t, f, h)
+			f.mu.Unlock()
+
+			err := e.Run(context.Background())
+			if !errors.Is(err, ErrIncomplete) {
+				t.Fatalf("err = %v", err)
+			}
+			if f.completed {
+				t.Fatal("the export session was closed although the keys changed")
+			}
+			r := readReport(t, dir)
+			if r.Complete || !strings.Contains(r.KeyCheck, tc.want) {
+				t.Fatalf("report = %+v, want keyCheck containing %q", r, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunClosesTheSessionWhenTheKeysAreUnchanged(t *testing.T) {
+	h := newKeyHistory(t)
+	f := newFakeAPI(t)
+	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+	dir := t.TempDir()
+
+	if err := historyExporter(t, f, h.resp, dir).Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !f.completed {
+		t.Fatal("the export session was not closed")
+	}
+	if r := readReport(t, dir); !r.Complete || r.KeyCheck != "" {
+		t.Fatalf("report = %+v", r)
 	}
 }

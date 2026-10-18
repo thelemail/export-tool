@@ -37,10 +37,11 @@ type report struct {
 	Pending     []failure          `json:"pending"`
 	Lost        []failure          `json:"lost"`
 	KeyWarnings []keyManifestEntry `json:"keyWarnings"`
+	KeyCheck    string             `json:"keyCheck,omitempty"`
 }
 
-func buildReport(cp *checkpoint, list []folder, keyWarnings []keyManifestEntry, now time.Time) report {
-	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}, KeyWarnings: []keyManifestEntry{}}
+func buildReport(cp *checkpoint, list []folder, keyWarnings []keyManifestEntry, keyCheck string, now time.Time) report {
+	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}, KeyWarnings: []keyManifestEntry{}, KeyCheck: keyCheck}
 	r.KeyWarnings = append(r.KeyWarnings, keyWarnings...)
 	for _, f := range list {
 		lost := 0
@@ -60,7 +61,7 @@ func buildReport(cp *checkpoint, list []folder, keyWarnings []keyManifestEntry, 
 		r.Pending = append(r.Pending, cp.Pending[f.name]...)
 	}
 	r.Lost = append(r.Lost, cp.Lost...)
-	r.Complete = len(r.Pending) == 0 && len(r.Lost) == 0 && len(r.KeyWarnings) == 0
+	r.Complete = len(r.Pending) == 0 && len(r.Lost) == 0 && len(r.KeyWarnings) == 0 && r.KeyCheck == ""
 	return r
 }
 

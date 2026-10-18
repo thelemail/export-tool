@@ -3,6 +3,7 @@ package export
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +51,8 @@ type fakeAPI struct {
 	epoch       int
 	bumpOnFetch bool
 	completed   bool
+	keys        api.AccountKeysResponse
+	keysStatus  int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -115,6 +118,15 @@ func (f *fakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []string{"me@thelemail.com"})
 	case r.URL.Path == "/v1/lifecycle/export/heartbeat":
 		writeJSON(w, map[string]string{"sessionId": "sess-1", "expiresAt": time.Now().Format(time.RFC3339)})
+	case r.URL.Path == "/v1/me/keys":
+		f.mu.Lock()
+		keys, status := f.keys, f.keysStatus
+		f.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
+		writeJSON(w, keys)
 	case r.URL.Path == "/v1/lifecycle/export/complete":
 		f.mu.Lock()
 		f.completed = true
@@ -258,7 +270,12 @@ func newExporter(t *testing.T, f *fakeAPI, key *testKey, dir string) *Exporter {
 	client.MaxAttempts = 2
 	client.Backoff = time.Millisecond
 	client.SetSession("token", "account")
-	return &Exporter{Client: client, Vault: key.vault, OutDir: dir, Session: "sess-1"}
+	fp := hex.EncodeToString(key.entity.PrimaryKey.Fingerprint)
+	f.mu.Lock()
+	f.keys = api.AccountKeysResponse{CurrentVersion: 1, Keys: []api.AccountKey{{KeyVersion: 1, KeyFingerprint: fp, IsCurrent: true}}}
+	f.mu.Unlock()
+	keys := []AccountKey{{Version: 1, Fingerprint: fp, Current: true, Fingerprints: []string{fp}}}
+	return &Exporter{Client: client, Vault: key.vault, OutDir: dir, Session: "sess-1", Keys: keys}
 }
 
 func readFile(t *testing.T, path string) string {
