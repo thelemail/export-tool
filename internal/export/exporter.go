@@ -152,7 +152,7 @@ func (e *Exporter) printIncomplete(r report) {
 	if len(r.Pending) > 0 {
 		fmt.Println("Re-run the same command with the same --out to retry those.")
 	}
-	fmt.Println("The export session is still open, so a scheduled deletion stays on hold.")
+	fmt.Println("The export was not marked complete on the server.")
 }
 
 func printFailures(label string, items []failure) {

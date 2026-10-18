@@ -49,8 +49,9 @@ ran, or the list cannot be fetched, `keyCheck` in `export-report.json` says so a
 again.
 
 While `pending`, `lost` or `keyWarnings` has anything in it, or `keyCheck` is set, the tool exits
-non-zero, leaves the server-side export session open so a scheduled deletion stays on hold, and
-does not report the export as complete.
+non-zero and does not mark the export complete on the server. That is a report, not a lock: a
+scheduled deletion stays on hold while the tool runs and for 7 days after it last ran, whether the
+export finished or not. Check `export-report.json` and re-run within that window.
 
 ## Usage
 
