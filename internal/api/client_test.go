@@ -169,8 +169,8 @@ func TestListMyKeysReadsTheKeyHistory(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth, path = r.Header.Get("Authorization"), r.URL.Path
 		_, _ = w.Write([]byte(`{"currentVersion":2,"keys":[` +
-			`{"keyVersion":2,"keyFingerprint":"aa","keyAlgorithm":"openpgp-curve25519-v6","publicKeyArmored":"pub2","encryptedPrivateKey":"priv2","isCurrent":true,"activatedAt":"2026-10-01T10:00:00Z"},` +
-			`{"keyVersion":1,"keyFingerprint":"bb","keyAlgorithm":"openpgp-ed25519","publicKeyArmored":"pub1","encryptedPrivateKey":"priv1","isCurrent":false,"activatedAt":"2026-06-03T21:35:27Z","retiredAt":"2026-10-01T10:00:00Z"}]}`))
+			`{"keyVersion":2,"keyFingerprint":"aa","keyAlgorithm":"openpgp-curve25519-v6","publicKeyArmored":"pub2","encryptedPrivateKey":"priv2","isCurrent":true,"activatedAt":"2026-10-01T10:00:00Z","transitions":[{"previousKeyFingerprint":"bb","signature":"c2lnbmF0dXJl"}]},` +
+			`{"keyVersion":1,"keyFingerprint":"bb","keyAlgorithm":"openpgp-ed25519","publicKeyArmored":"pub1","encryptedPrivateKey":"priv1","isCurrent":false,"activatedAt":"2026-06-03T21:35:27Z","retiredAt":"2026-10-01T10:00:00Z","transitions":[]}]}`))
 	}))
 	defer srv.Close()
 
