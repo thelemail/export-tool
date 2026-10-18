@@ -120,8 +120,7 @@ func (e *Exporter) Run(ctx context.Context) error {
 		return err
 	}
 
-	r := buildReport(cp, all, time.Now().UTC())
-	r.KeyWarnings = e.keyWarnings()
+	r := buildReport(cp, all, e.keyWarnings(), time.Now().UTC())
 	if err := writeReport(e.OutDir, r); err != nil {
 		return err
 	}
@@ -140,9 +139,12 @@ func (e *Exporter) Run(ctx context.Context) error {
 
 func (e *Exporter) printIncomplete(r report) {
 	fmt.Println()
-	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read.\n", len(r.Pending), len(r.Lost))
+	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read, %d of your keys would not unlock.\n", len(r.Pending), len(r.Lost), len(r.KeyWarnings))
 	printFailures("could not fetch", r.Pending)
 	printFailures("could not read", r.Lost)
+	for _, k := range r.KeyWarnings {
+		fmt.Printf("  key version %d (%s) could not be unlocked: %s\n", k.Version, k.Fingerprint, k.Error)
+	}
 	fmt.Printf("\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
 	if len(r.Pending) > 0 {
 		fmt.Println("Re-run the same command with the same --out to retry those.")

@@ -415,3 +415,32 @@ func TestRunReportsMailEncryptedToKeysItCannotUse(t *testing.T) {
 		t.Fatal("a key that did not unlock was not written out")
 	}
 }
+
+func TestRunKeepsTheSessionOpenWhenAnOldKeyDoesNotUnlock(t *testing.T) {
+	h := newKeyHistory(t)
+	locked := newAccountKey(t, v4KeyConfig, "lost passphrase")
+	h.resp.Keys[1] = listed(1, false, locked)
+
+	f := newFakeAPI(t)
+	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+	dir := t.TempDir()
+
+	err := historyExporter(t, f, h.resp, dir).Run(context.Background())
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("err = %v", err)
+	}
+	if f.completed {
+		t.Fatal("the export session was closed with a key that did not unlock")
+	}
+	r := readReport(t, dir)
+	if r.Complete || len(r.Lost) != 0 || len(r.Pending) != 0 {
+		t.Fatalf("report = %+v", r)
+	}
+	if len(r.KeyWarnings) != 1 || r.KeyWarnings[0].Version != 1 || r.KeyWarnings[0].Unlocked {
+		t.Fatalf("key warnings = %+v", r.KeyWarnings)
+	}
+	if got := readFile(t, filepath.Join(dir, "private-keys", "1-"+locked.fingerprint()+".asc")); got != normalize(locked.private) {
+		t.Fatal("the locked key was not written out")
+	}
+}

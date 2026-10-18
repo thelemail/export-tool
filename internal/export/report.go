@@ -39,8 +39,9 @@ type report struct {
 	KeyWarnings []keyManifestEntry `json:"keyWarnings"`
 }
 
-func buildReport(cp *checkpoint, list []folder, now time.Time) report {
+func buildReport(cp *checkpoint, list []folder, keyWarnings []keyManifestEntry, now time.Time) report {
 	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}, KeyWarnings: []keyManifestEntry{}}
+	r.KeyWarnings = append(r.KeyWarnings, keyWarnings...)
 	for _, f := range list {
 		lost := 0
 		for _, l := range cp.Lost {
@@ -59,7 +60,7 @@ func buildReport(cp *checkpoint, list []folder, now time.Time) report {
 		r.Pending = append(r.Pending, cp.Pending[f.name]...)
 	}
 	r.Lost = append(r.Lost, cp.Lost...)
-	r.Complete = len(r.Pending) == 0 && len(r.Lost) == 0
+	r.Complete = len(r.Pending) == 0 && len(r.Lost) == 0 && len(r.KeyWarnings) == 0
 	return r
 }
 
