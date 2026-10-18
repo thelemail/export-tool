@@ -209,25 +209,59 @@ func TestUnlockAccountKeysReportsHistoryKeysThatDoNotUnlock(t *testing.T) {
 
 func TestUnlockAccountKeysRejectsAnInconsistentList(t *testing.T) {
 	h := newKeyHistory(t)
-	cases := map[string]func(r *api.AccountKeysResponse){
-		"empty":                 func(r *api.AccountKeysResponse) { r.Keys = nil },
-		"no current":            func(r *api.AccountKeysResponse) { r.Keys[0].IsCurrent = false },
-		"two current":           func(r *api.AccountKeysResponse) { r.Keys[2].IsCurrent = true },
-		"version above":         func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 4 },
-		"duplicate version":     func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 2 },
-		"duplicate key":         func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = r.Keys[2].KeyFingerprint },
-		"path in fingerprint":   func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = "../../" + strings.Repeat("a", 34) },
-		"wrong fingerprint":     func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.Repeat("a", 40) },
-		"uppercase fingerprint": func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.ToUpper(r.Keys[1].KeyFingerprint) },
+	cases := map[string]struct {
+		mutate func(r *api.AccountKeysResponse)
+		want   string
+	}{
+		"empty":                 {func(r *api.AccountKeysResponse) { r.Keys = nil }, "returned no keys"},
+		"current version zero":  {func(r *api.AccountKeysResponse) { r.CurrentVersion = 0 }, "invalid current version 0"},
+		"key version zero":      {func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 0 }, "invalid key version 0"},
+		"no current":            {func(r *api.AccountKeysResponse) { r.Keys[0].IsCurrent = false }, "key version 3 disagrees with current version 3"},
+		"two current":           {func(r *api.AccountKeysResponse) { r.Keys[2].IsCurrent = true }, "key version 2 disagrees with current version 3"},
+		"current missing":       {func(r *api.AccountKeysResponse) { r.CurrentVersion = 4; r.Keys[0].IsCurrent = false }, "current version 4 is missing"},
+		"version above":         {func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 4 }, "invalid key version 4"},
+		"duplicate version":     {func(r *api.AccountKeysResponse) { r.Keys[1].KeyVersion = 2 }, "key version 2 is listed twice"},
+		"duplicate key":         {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = r.Keys[2].KeyFingerprint }, "is listed twice"},
+		"path in fingerprint":   {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = "../../" + strings.Repeat("a", 34) }, "key version 1 has an invalid fingerprint"},
+		"uppercase fingerprint": {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.ToUpper(r.Keys[1].KeyFingerprint) }, "key version 1 has an invalid fingerprint"},
+		"wrong fingerprint":     {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.Repeat("a", 40) }, "key version 1 is listed as " + strings.Repeat("a", 40)},
+		"wrong current":         {func(r *api.AccountKeysResponse) { r.Keys[0].KeyFingerprint = strings.Repeat("b", 64) }, "key version 3 is listed as " + strings.Repeat("b", 64)},
 	}
-	for name, mutate := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			resp := api.AccountKeysResponse{CurrentVersion: h.resp.CurrentVersion, Keys: append([]api.AccountKey(nil), h.resp.Keys...)}
-			mutate(&resp)
-			if _, _, err := UnlockAccountKeys(resp, []byte(vaultPassphrase)); err == nil {
-				t.Fatal("expected an error")
+			tc.mutate(&resp)
+			_, _, err := UnlockAccountKeys(resp, []byte(vaultPassphrase))
+			if err == nil {
+				t.Fatalf("expected an error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestUnlockAccountKeysReportsAHistoryKeyWithNoPrivateKey(t *testing.T) {
+	h := newKeyHistory(t)
+	h.resp.Keys[2].EncryptedPrivateKey = ""
+
+	_, keys, err := UnlockAccountKeys(h.resp, []byte(vaultPassphrase))
+	if err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	var missing AccountKey
+	for _, k := range keys {
+		if k.Version == 2 {
+			missing = k
+		}
+	}
+	if missing.UnlockError == "" {
+		t.Fatalf("version 2 = %+v, want an unlock error", missing)
+	}
+	warnings := (&Exporter{Keys: keys}).keyWarnings()
+	if len(warnings) != 1 || warnings[0].Version != 2 || warnings[0].Unlocked || warnings[0].Error == "" || warnings[0].File != "" {
+		t.Fatalf("key warnings = %+v", warnings)
 	}
 }
 
