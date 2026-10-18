@@ -225,6 +225,7 @@ func TestUnlockAccountKeysRejectsAnInconsistentList(t *testing.T) {
 		"path in fingerprint":   {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = "../../" + strings.Repeat("a", 34) }, "key version 1 has an invalid fingerprint"},
 		"uppercase fingerprint": {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.ToUpper(r.Keys[1].KeyFingerprint) }, "key version 1 has an invalid fingerprint"},
 		"wrong fingerprint":     {func(r *api.AccountKeysResponse) { r.Keys[1].KeyFingerprint = strings.Repeat("a", 40) }, "key version 1 is listed as " + strings.Repeat("a", 40)},
+		"gap":                   {func(r *api.AccountKeysResponse) { r.Keys = append(r.Keys[:2:2], r.Keys[3:]...) }, "key version 2 is missing"},
 		"wrong current":         {func(r *api.AccountKeysResponse) { r.Keys[0].KeyFingerprint = strings.Repeat("b", 64) }, "key version 3 is listed as " + strings.Repeat("b", 64)},
 	}
 	for name, tc := range cases {

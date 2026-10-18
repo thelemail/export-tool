@@ -109,6 +109,11 @@ func checkKeyList(resp api.AccountKeysResponse) ([]AccountKey, error) {
 	if current != 1 {
 		return nil, fmt.Errorf("key list: current version %d is missing", resp.CurrentVersion)
 	}
+	for v := 1; v <= resp.CurrentVersion; v++ {
+		if !seen[v] {
+			return nil, fmt.Errorf("key list: key version %d is missing", v)
+		}
+	}
 	return keys, nil
 }
 
