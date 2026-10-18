@@ -46,7 +46,9 @@ is still written to `private-keys/`.
 
 Before it finishes, the tool asks for your key list again. If a key was added or replaced while it
 ran, or the list cannot be fetched, `keyCheck` in `export-report.json` says so and you should run it
-again.
+again. You can keep the same `--out`: the tool remembers which keys a run used, and when they have
+changed it starts that folder over from the beginning, so mail it could not read with the old keys
+is fetched again.
 
 While `pending`, `lost` or `keyWarnings` has anything in it, or `keyCheck` is set, the tool exits
 non-zero and does not mark the export complete on the server. That is a report, not a lock: a

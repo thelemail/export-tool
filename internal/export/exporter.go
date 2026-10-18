@@ -68,6 +68,7 @@ type checkpoint struct {
 	Pending map[string][]failure    `json:"pending"`
 	Labels  map[string]labelRecord  `json:"labels,omitempty"`
 	Lost    []failure               `json:"lost"`
+	KeySet  string                  `json:"keySet,omitempty"`
 }
 
 func (e *Exporter) Run(ctx context.Context) error {
@@ -83,6 +84,16 @@ func (e *Exporter) Run(ctx context.Context) error {
 		return fmt.Errorf("load folders and labels: %w", err)
 	}
 	all := append(folders(), customFolders(org)...)
+	if keySet := e.keySet(); cp.KeySet == "" && len(e.Keys) == 1 {
+		cp.KeySet = keySet
+	} else if cp.KeySet != keySet {
+		if cp.started() {
+			fmt.Println("Your keys changed since the last run, so the export starts over.")
+		}
+		if err := e.restart(cp, all, keySet); err != nil {
+			return err
+		}
+	}
 
 	worthAnotherSweep := map[string]bool{}
 	for _, f := range all {
@@ -587,6 +598,40 @@ func (e *Exporter) loadCheckpoint() *checkpoint {
 		cp.Labels = map[string]labelRecord{}
 	}
 	return cp
+}
+
+func (cp *checkpoint) started() bool {
+	return len(cp.Offsets) > 0 || len(cp.Done) > 0 || len(cp.Cursors) > 0 || len(cp.Pending) > 0 || len(cp.Lost) > 0
+}
+
+func (e *Exporter) restart(cp *checkpoint, all []folder, keySet string) error {
+	current := map[string]bool{}
+	for _, f := range all {
+		current[f.name] = true
+	}
+	for name := range cp.Offsets {
+		if current[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(e.OutDir, name+".mbox")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	*cp = checkpoint{
+		Version: checkpointVersion,
+		Cursors: map[string]string{},
+		Done:    map[string]bool{},
+		Offsets: map[string]int64{},
+		Totals:  map[string]folderTotals{},
+		Pending: map[string][]failure{},
+		Labels:  map[string]labelRecord{},
+		KeySet:  keySet,
+	}
+	for _, f := range all {
+		cp.Offsets[f.name] = 0
+	}
+	e.saveCheckpoint(cp)
+	return nil
 }
 
 func (e *Exporter) saveCheckpoint(cp *checkpoint) {

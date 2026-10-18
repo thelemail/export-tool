@@ -2,6 +2,7 @@ package export
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -233,7 +234,17 @@ func (e *Exporter) keyWarnings() []keyManifestEntry {
 	return out
 }
 
-const keysChanged = "your keys changed during the export, run it again"
+const keysChanged = "your keys changed during the export, run the same command again and it will start over with the new keys"
+
+func (e *Exporter) keySet() string {
+	keys := append([]AccountKey(nil), e.Keys...)
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Version < keys[j].Version })
+	h := sha256.New()
+	for _, k := range keys {
+		fmt.Fprintf(h, "%d:%s\n", k.Version, k.Fingerprint)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 func (e *Exporter) recheckKeys(ctx context.Context) string {
 	resp, err := e.Client.ListMyKeys(ctx)

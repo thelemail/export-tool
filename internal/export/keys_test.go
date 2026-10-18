@@ -514,3 +514,81 @@ func TestRunClosesTheSessionWhenTheKeysAreUnchanged(t *testing.T) {
 		t.Fatalf("report = %+v", r)
 	}
 }
+
+func TestRunStartsOverInTheSameFolderAfterTheKeysChange(t *testing.T) {
+	h := newKeyHistory(t)
+	next := newAccountKey(t, v6KeyConfig, vaultPassphrase)
+	rotated := api.AccountKeysResponse{CurrentVersion: 4, Keys: []api.AccountKey{
+		listed(4, true, next), listed(3, false, h.current), h.resp.Keys[1], h.resp.Keys[2],
+	}}
+
+	f := newFakeAPI(t)
+	f.put("body-now", h.current.encrypt(t, mailBody("Before")))
+	f.put("body-next", next.encrypt(t, mailBody("After")))
+	f.add("inbox", []fakeMessage{
+		{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint},
+		{id: "m2", bodyKey: "body-next", bodyKeyFP: next.entity.PrimaryKey.Fingerprint},
+	})
+	dir := t.TempDir()
+
+	e := historyExporter(t, f, h.resp, dir)
+	f.mu.Lock()
+	f.keys = rotated
+	f.mu.Unlock()
+	if err := e.Run(context.Background()); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("first run err = %v", err)
+	}
+	if r := readReport(t, dir); r.KeyCheck != keysChanged || len(r.Lost) != 1 || r.Lost[0].MessageID != "m2" {
+		t.Fatalf("first report = %+v", r)
+	}
+
+	if err := historyExporter(t, f, rotated, dir).Run(context.Background()); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if !f.completed {
+		t.Fatal("the export session was not closed after the re-run")
+	}
+	r := readReport(t, dir)
+	if !r.Complete || len(r.Lost) != 0 || r.KeyCheck != "" {
+		t.Fatalf("second report = %+v", r)
+	}
+	if len(r.Folders) == 0 || r.Folders[0].Name != "inbox" || r.Folders[0].Messages != 2 {
+		t.Fatalf("folders = %+v", r.Folders)
+	}
+	mbox := readFile(t, filepath.Join(dir, "inbox.mbox"))
+	if countEntries(mbox) != 2 || !strings.Contains(mbox, "Before body") || !strings.Contains(mbox, "After body") {
+		t.Fatalf("mbox = %q", mbox)
+	}
+}
+
+func TestRunDropsFoldersThatAreGoneWhenItStartsOver(t *testing.T) {
+	h := newKeyHistory(t)
+	f := newFakeAPI(t)
+	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+	dir := t.TempDir()
+
+	stale := `{"keySet":"stale","done":{"inbox":true,"f-gone":true},"offsets":{"inbox":40,"f-gone":40},"totals":{"inbox":{"messages":1}}}`
+	if err := os.WriteFile(filepath.Join(dir, ".export-checkpoint.json"), []byte(stale), 0o600); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+	for _, name := range []string{"inbox", "f-gone"} {
+		if err := os.WriteFile(filepath.Join(dir, name+".mbox"), []byte("From a@b Tue Mar  4 10:11:12 2026\nold\n\n"), 0o600); err != nil {
+			t.Fatalf("seed mbox: %v", err)
+		}
+	}
+
+	if err := historyExporter(t, f, h.resp, dir).Run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "f-gone.mbox")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale folder survived: %v", err)
+	}
+	mbox := readFile(t, filepath.Join(dir, "inbox.mbox"))
+	if strings.Contains(mbox, "\nold\n") || countEntries(mbox) != 1 {
+		t.Fatalf("mbox = %q", mbox)
+	}
+	if r := readReport(t, dir); !r.Complete || r.Folders[0].Messages != 1 {
+		t.Fatalf("report = %+v", r)
+	}
+}
