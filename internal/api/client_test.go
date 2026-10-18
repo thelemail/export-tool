@@ -163,3 +163,35 @@ func TestHTTPErrorsCollapseLongBodies(t *testing.T) {
 		t.Fatalf("error is %d chars", len(long.Error()))
 	}
 }
+
+func TestListMyKeysReadsTheKeyHistory(t *testing.T) {
+	var auth, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth, path = r.Header.Get("Authorization"), r.URL.Path
+		_, _ = w.Write([]byte(`{"currentVersion":2,"keys":[` +
+			`{"keyVersion":2,"keyFingerprint":"aa","keyAlgorithm":"openpgp-curve25519-v6","publicKeyArmored":"pub2","encryptedPrivateKey":"priv2","isCurrent":true,"activatedAt":"2026-10-01T10:00:00Z"},` +
+			`{"keyVersion":1,"keyFingerprint":"bb","keyAlgorithm":"openpgp-ed25519","publicKeyArmored":"pub1","encryptedPrivateKey":"priv1","isCurrent":false,"activatedAt":"2026-06-03T21:35:27Z","retiredAt":"2026-10-01T10:00:00Z"}]}`))
+	}))
+	defer srv.Close()
+
+	c := testClient(srv)
+	c.SetSession("tok", "acct")
+	out, err := c.ListMyKeys(context.Background())
+	if err != nil {
+		t.Fatalf("list keys: %v", err)
+	}
+	if path != "/v1/me/keys" || auth != "Bearer tok" {
+		t.Fatalf("path = %q, auth = %q", path, auth)
+	}
+	if out.CurrentVersion != 2 || len(out.Keys) != 2 {
+		t.Fatalf("out = %+v", out)
+	}
+	cur, old := out.Keys[0], out.Keys[1]
+	if !cur.IsCurrent || cur.KeyVersion != 2 || cur.EncryptedPrivateKey != "priv2" || cur.RetiredAt != nil {
+		t.Fatalf("current = %+v", cur)
+	}
+	retired := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	if old.IsCurrent || old.KeyFingerprint != "bb" || old.PublicKeyArmored != "pub1" || old.RetiredAt == nil || !old.RetiredAt.Equal(retired) {
+		t.Fatalf("history = %+v", old)
+	}
+}

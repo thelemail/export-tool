@@ -94,6 +94,28 @@ func (c *Client) VerifyBackupCode(ctx context.Context, pendingToken, code string
 	return out, err
 }
 
+type AccountKey struct {
+	KeyVersion          int        `json:"keyVersion"`
+	KeyFingerprint      string     `json:"keyFingerprint"`
+	KeyAlgorithm        string     `json:"keyAlgorithm"`
+	PublicKeyArmored    string     `json:"publicKeyArmored"`
+	EncryptedPrivateKey string     `json:"encryptedPrivateKey"`
+	IsCurrent           bool       `json:"isCurrent"`
+	ActivatedAt         *time.Time `json:"activatedAt"`
+	RetiredAt           *time.Time `json:"retiredAt"`
+}
+
+type AccountKeysResponse struct {
+	CurrentVersion int          `json:"currentVersion"`
+	Keys           []AccountKey `json:"keys"`
+}
+
+func (c *Client) ListMyKeys(ctx context.Context) (AccountKeysResponse, error) {
+	var out AccountKeysResponse
+	err := c.do(ctx, http.MethodGet, "/v1/me/keys", nil, &out)
+	return out, err
+}
+
 type PresignedPointer struct {
 	URL            string    `json:"url"`
 	ExpiresAt      time.Time `json:"expiresAt"`
