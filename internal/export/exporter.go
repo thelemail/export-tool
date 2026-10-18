@@ -27,11 +27,11 @@ const (
 var ErrIncomplete = errors.New("export incomplete")
 
 type Exporter struct {
-	Client              *api.Client
-	Vault               *crypto.Vault
-	OutDir              string
-	Session             string
-	EncryptedPrivateKey string
+	Client  *api.Client
+	Vault   *crypto.Vault
+	OutDir  string
+	Session string
+	Keys    []AccountKey
 }
 
 type folder struct {
@@ -121,6 +121,7 @@ func (e *Exporter) Run(ctx context.Context) error {
 	}
 
 	r := buildReport(cp, all, time.Now().UTC())
+	r.KeyWarnings = e.keyWarnings()
 	if err := writeReport(e.OutDir, r); err != nil {
 		return err
 	}
@@ -378,7 +379,7 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 	}
 	plain, err := e.Vault.Decrypt(cipher)
 	if err != nil {
-		return builtMessage{}, staged("body", err)
+		return builtMessage{}, staged("body", e.explainDecrypt(mf.detail.Body.KeyFingerprint, err))
 	}
 	mimeStr := unwrapPgpMime(e.Vault, string(plain))
 
@@ -393,7 +394,7 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 		var payload []byte
 		raw, err := mf.fetch(ctx, a.ID)
 		if err == nil {
-			header, payload, err = e.openAttachment(raw)
+			header, payload, err = e.openAttachment(raw, a.Pointer.KeyFingerprint)
 		}
 		if err != nil {
 			if api.Retryable(err) {
@@ -434,10 +435,10 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 	}, nil
 }
 
-func (e *Exporter) openAttachment(raw []byte) (attframe.Header, []byte, error) {
+func (e *Exporter) openAttachment(raw, keyFingerprint []byte) (attframe.Header, []byte, error) {
 	plain, err := e.Vault.Decrypt(raw)
 	if err != nil {
-		return attframe.Header{}, nil, err
+		return attframe.Header{}, nil, e.explainDecrypt(keyFingerprint, err)
 	}
 	header, payload, err := attframe.Parse(plain)
 	if err == nil {
@@ -534,15 +535,6 @@ func recordLost(cp *checkpoint, f failure) {
 		}
 	}
 	cp.Lost = append(cp.Lost, f)
-}
-
-func (e *Exporter) writeKeyMaterial() error {
-	if e.EncryptedPrivateKey != "" {
-		if err := os.WriteFile(filepath.Join(e.OutDir, "private-key-encrypted.asc"), []byte(e.EncryptedPrivateKey), 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (e *Exporter) writeSettings(ctx context.Context) error {

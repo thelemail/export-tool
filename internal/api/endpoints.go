@@ -64,7 +64,6 @@ type LoginSessionGrant struct {
 	AccountID           string              `json:"accountId"`
 	AccessToken         string              `json:"accessToken"`
 	ExpiresInSeconds    int                 `json:"expiresInSeconds"`
-	EncryptedPrivateKey string              `json:"encryptedPrivateKey"`
 	WrappedMasterKey    []byte              `json:"wrappedMasterKey"`
 	MasterKeyID         []byte              `json:"masterKeyId"`
 	OpaqueParamsVersion int                 `json:"opaqueParamsVersion"`

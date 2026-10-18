@@ -31,15 +31,16 @@ type reportFolder struct {
 }
 
 type report struct {
-	GeneratedAt time.Time      `json:"generatedAt"`
-	Complete    bool           `json:"complete"`
-	Folders     []reportFolder `json:"folders"`
-	Pending     []failure      `json:"pending"`
-	Lost        []failure      `json:"lost"`
+	GeneratedAt time.Time          `json:"generatedAt"`
+	Complete    bool               `json:"complete"`
+	Folders     []reportFolder     `json:"folders"`
+	Pending     []failure          `json:"pending"`
+	Lost        []failure          `json:"lost"`
+	KeyWarnings []keyManifestEntry `json:"keyWarnings"`
 }
 
 func buildReport(cp *checkpoint, list []folder, now time.Time) report {
-	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}}
+	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}, KeyWarnings: []keyManifestEntry{}}
 	for _, f := range list {
 		lost := 0
 		for _, l := range cp.Lost {

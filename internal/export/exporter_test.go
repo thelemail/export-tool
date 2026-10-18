@@ -25,11 +25,13 @@ type fakeAttachment struct {
 	ordinal  int
 	key      string
 	isInline bool
+	keyFP    []byte
 }
 
 type fakeMessage struct {
 	id          string
 	bodyKey     string
+	bodyKeyFP   []byte
 	attachments []fakeAttachment
 	labelIDs    []string
 }
@@ -202,19 +204,23 @@ func (f *fakeAPI) serveDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	pointer := func(key string) map[string]any {
-		return map[string]any{
+	pointer := func(key string, fp []byte) map[string]any {
+		p := map[string]any{
 			"url":       fmt.Sprintf("%s/blob/%s?epoch=%d", f.srv.URL, key, epoch),
 			"expiresAt": time.Now().Add(time.Minute).Format(time.RFC3339),
 			"sizeBytes": 0,
 		}
+		if len(fp) > 0 {
+			p["keyFingerprint"] = fp
+		}
+		return p
 	}
 	atts := []map[string]any{}
 	for _, a := range m.attachments {
 		atts = append(atts, map[string]any{
 			"id":       a.id,
 			"ordinal":  a.ordinal,
-			"pointer":  pointer(a.key),
+			"pointer":  pointer(a.key, a.keyFP),
 			"isInline": a.isInline,
 		})
 	}
@@ -222,7 +228,7 @@ func (f *fakeAPI) serveDetail(w http.ResponseWriter, r *http.Request) {
 		"id":          m.id,
 		"source":      "internal",
 		"encrypted":   false,
-		"body":        pointer(m.bodyKey),
+		"body":        pointer(m.bodyKey, m.bodyKeyFP),
 		"attachments": atts,
 	})
 }

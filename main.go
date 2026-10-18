@@ -111,16 +111,21 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 			return err
 		}
 	}
-	if grant.AccessToken == "" || grant.EncryptedPrivateKey == "" {
+	if grant.AccessToken == "" {
 		return fmt.Errorf("login complete: unexpected server response")
 	}
 	client.SetSession(grant.AccessToken, grant.AccountID)
 	fmt.Println("Signed in.")
 
-	vault, err := unlock(exportKey, grant)
+	keyList, err := client.ListMyKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("list account keys: %w", err)
+	}
+	vault, keys, err := unlock(exportKey, grant, keyList)
 	if err != nil {
 		return err
 	}
+	printKeys(keys)
 
 	var session string
 	if hb, err := client.ExportHeartbeat(ctx, ""); err == nil {
@@ -128,39 +133,57 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 	}
 
 	e := &export.Exporter{
-		Client:              client,
-		Vault:               vault,
-		OutDir:              out,
-		Session:             session,
-		EncryptedPrivateKey: grant.EncryptedPrivateKey,
+		Client:  client,
+		Vault:   vault,
+		OutDir:  out,
+		Session: session,
+		Keys:    keys,
 	}
 	return e.Run(ctx)
 }
 
-func unlock(exportKey []byte, grant api.LoginSessionGrant) (*crypto.Vault, error) {
+func unlock(exportKey []byte, grant api.LoginSessionGrant, keyList api.AccountKeysResponse) (*crypto.Vault, []export.AccountKey, error) {
 	amk, err := crypto.UnwrapMasterKey(exportKey, grant.WrappedMasterKey)
 	if err != nil {
-		return nil, fmt.Errorf("unlock mailbox key: %w", err)
+		return nil, nil, fmt.Errorf("unlock mailbox key: %w", err)
 	}
 	defer zero(amk)
 
 	id, err := crypto.DeriveMasterKeyID(amk)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if subtle.ConstantTimeCompare(id, grant.MasterKeyID) != 1 {
-		return nil, fmt.Errorf("unlock mailbox key: master key does not match the account")
+		return nil, nil, fmt.Errorf("unlock mailbox key: master key does not match the account")
 	}
 
 	passphrase, err := crypto.DerivePGPPassphrase(amk)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	vault, err := crypto.UnlockVault(grant.EncryptedPrivateKey, []byte(passphrase))
+	pass := []byte(passphrase)
+	defer zero(pass)
+	vault, keys, err := export.UnlockAccountKeys(keyList, pass)
 	if err != nil {
-		return nil, fmt.Errorf("unlock mailbox key: %w", err)
+		return nil, nil, fmt.Errorf("unlock mailbox key: %w", err)
 	}
-	return vault, nil
+	return vault, keys, nil
+}
+
+func printKeys(keys []export.AccountKey) {
+	unlocked := 0
+	for _, k := range keys {
+		if k.UnlockError == "" {
+			unlocked++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "warning: key version %d (%s) could not be unlocked: %s\n", k.Version, k.Fingerprint, k.UnlockError)
+	}
+	if len(keys) == 1 {
+		fmt.Println("Unlocked your key.")
+		return
+	}
+	fmt.Printf("Unlocked %d of %d keys.\n", unlocked, len(keys))
 }
 
 func solveTwoFactor(ctx context.Context, client *api.Client, ch *api.TwoFactorChallenge) (api.LoginSessionGrant, error) {
