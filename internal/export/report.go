@@ -31,15 +31,18 @@ type reportFolder struct {
 }
 
 type report struct {
-	GeneratedAt time.Time      `json:"generatedAt"`
-	Complete    bool           `json:"complete"`
-	Folders     []reportFolder `json:"folders"`
-	Pending     []failure      `json:"pending"`
-	Lost        []failure      `json:"lost"`
+	GeneratedAt time.Time          `json:"generatedAt"`
+	Complete    bool               `json:"complete"`
+	Folders     []reportFolder     `json:"folders"`
+	Pending     []failure          `json:"pending"`
+	Lost        []failure          `json:"lost"`
+	KeyWarnings []keyManifestEntry `json:"keyWarnings"`
+	KeyCheck    string             `json:"keyCheck,omitempty"`
 }
 
-func buildReport(cp *checkpoint, list []folder, now time.Time) report {
-	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}}
+func buildReport(cp *checkpoint, list []folder, keyWarnings []keyManifestEntry, keyCheck string, now time.Time) report {
+	r := report{GeneratedAt: now, Pending: []failure{}, Lost: []failure{}, KeyWarnings: []keyManifestEntry{}, KeyCheck: keyCheck}
+	r.KeyWarnings = append(r.KeyWarnings, keyWarnings...)
 	for _, f := range list {
 		lost := 0
 		for _, l := range cp.Lost {
@@ -58,7 +61,7 @@ func buildReport(cp *checkpoint, list []folder, now time.Time) report {
 		r.Pending = append(r.Pending, cp.Pending[f.name]...)
 	}
 	r.Lost = append(r.Lost, cp.Lost...)
-	r.Complete = len(r.Pending) == 0 && len(r.Lost) == 0
+	r.Complete = len(r.Pending) == 0 && len(r.Lost) == 0 && len(r.KeyWarnings) == 0 && r.KeyCheck == ""
 	return r
 }
 

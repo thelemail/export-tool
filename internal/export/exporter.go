@@ -27,11 +27,11 @@ const (
 var ErrIncomplete = errors.New("export incomplete")
 
 type Exporter struct {
-	Client              *api.Client
-	Vault               *crypto.Vault
-	OutDir              string
-	Session             string
-	EncryptedPrivateKey string
+	Client  *api.Client
+	Vault   *crypto.Vault
+	OutDir  string
+	Session string
+	Keys    []AccountKey
 }
 
 type folder struct {
@@ -68,6 +68,7 @@ type checkpoint struct {
 	Pending map[string][]failure    `json:"pending"`
 	Labels  map[string]labelRecord  `json:"labels,omitempty"`
 	Lost    []failure               `json:"lost"`
+	KeySet  string                  `json:"keySet,omitempty"`
 }
 
 func (e *Exporter) Run(ctx context.Context) error {
@@ -83,6 +84,16 @@ func (e *Exporter) Run(ctx context.Context) error {
 		return fmt.Errorf("load folders and labels: %w", err)
 	}
 	all := append(folders(), customFolders(org)...)
+	if keySet := e.keySet(); cp.KeySet == "" && len(e.Keys) == 1 {
+		cp.KeySet = keySet
+	} else if cp.KeySet != keySet {
+		if cp.started() {
+			fmt.Println("Your keys changed since the last run, so the export starts over.")
+		}
+		if err := e.restart(cp, all, keySet); err != nil {
+			return err
+		}
+	}
 
 	worthAnotherSweep := map[string]bool{}
 	for _, f := range all {
@@ -120,7 +131,7 @@ func (e *Exporter) Run(ctx context.Context) error {
 		return err
 	}
 
-	r := buildReport(cp, all, time.Now().UTC())
+	r := buildReport(cp, all, e.keyWarnings(), e.recheckKeys(ctx), time.Now().UTC())
 	if err := writeReport(e.OutDir, r); err != nil {
 		return err
 	}
@@ -139,14 +150,20 @@ func (e *Exporter) Run(ctx context.Context) error {
 
 func (e *Exporter) printIncomplete(r report) {
 	fmt.Println()
-	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read.\n", len(r.Pending), len(r.Lost))
+	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read, %d of your keys would not unlock.\n", len(r.Pending), len(r.Lost), len(r.KeyWarnings))
 	printFailures("could not fetch", r.Pending)
 	printFailures("could not read", r.Lost)
+	for _, k := range r.KeyWarnings {
+		fmt.Printf("  key version %d (%s) could not be unlocked: %s\n", k.Version, k.Fingerprint, k.Error)
+	}
+	if r.KeyCheck != "" {
+		fmt.Printf("  %s\n", r.KeyCheck)
+	}
 	fmt.Printf("\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
 	if len(r.Pending) > 0 {
 		fmt.Println("Re-run the same command with the same --out to retry those.")
 	}
-	fmt.Println("The export session is still open, so a scheduled deletion stays on hold.")
+	fmt.Println("The export was not marked complete on the server.")
 }
 
 func printFailures(label string, items []failure) {
@@ -378,7 +395,7 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 	}
 	plain, err := e.Vault.Decrypt(cipher)
 	if err != nil {
-		return builtMessage{}, staged("body", err)
+		return builtMessage{}, staged("body", e.explainDecrypt(mf.detail.Body.KeyFingerprint, err))
 	}
 	mimeStr := unwrapPgpMime(e.Vault, string(plain))
 
@@ -393,7 +410,7 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 		var payload []byte
 		raw, err := mf.fetch(ctx, a.ID)
 		if err == nil {
-			header, payload, err = e.openAttachment(raw)
+			header, payload, err = e.openAttachment(raw, a.Pointer.KeyFingerprint)
 		}
 		if err != nil {
 			if api.Retryable(err) {
@@ -434,10 +451,10 @@ func (e *Exporter) buildMessage(ctx context.Context, folderName, messageID strin
 	}, nil
 }
 
-func (e *Exporter) openAttachment(raw []byte) (attframe.Header, []byte, error) {
+func (e *Exporter) openAttachment(raw, keyFingerprint []byte) (attframe.Header, []byte, error) {
 	plain, err := e.Vault.Decrypt(raw)
 	if err != nil {
-		return attframe.Header{}, nil, err
+		return attframe.Header{}, nil, e.explainDecrypt(keyFingerprint, err)
 	}
 	header, payload, err := attframe.Parse(plain)
 	if err == nil {
@@ -536,15 +553,6 @@ func recordLost(cp *checkpoint, f failure) {
 	cp.Lost = append(cp.Lost, f)
 }
 
-func (e *Exporter) writeKeyMaterial() error {
-	if e.EncryptedPrivateKey != "" {
-		if err := os.WriteFile(filepath.Join(e.OutDir, "private-key-encrypted.asc"), []byte(e.EncryptedPrivateKey), 0o600); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (e *Exporter) writeSettings(ctx context.Context) error {
 	settings, _ := e.Client.AccountSettings(ctx)
 	addresses, _ := e.Client.Addresses(ctx)
@@ -590,6 +598,40 @@ func (e *Exporter) loadCheckpoint() *checkpoint {
 		cp.Labels = map[string]labelRecord{}
 	}
 	return cp
+}
+
+func (cp *checkpoint) started() bool {
+	return len(cp.Offsets) > 0 || len(cp.Done) > 0 || len(cp.Cursors) > 0 || len(cp.Pending) > 0 || len(cp.Lost) > 0
+}
+
+func (e *Exporter) restart(cp *checkpoint, all []folder, keySet string) error {
+	current := map[string]bool{}
+	for _, f := range all {
+		current[f.name] = true
+	}
+	for name := range cp.Offsets {
+		if current[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(e.OutDir, name+".mbox")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	*cp = checkpoint{
+		Version: checkpointVersion,
+		Cursors: map[string]string{},
+		Done:    map[string]bool{},
+		Offsets: map[string]int64{},
+		Totals:  map[string]folderTotals{},
+		Pending: map[string][]failure{},
+		Labels:  map[string]labelRecord{},
+		KeySet:  keySet,
+	}
+	for _, f := range all {
+		cp.Offsets[f.name] = 0
+	}
+	e.saveCheckpoint(cp)
+	return nil
 }
 
 func (e *Exporter) saveCheckpoint(cp *checkpoint) {

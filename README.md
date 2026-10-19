@@ -13,7 +13,9 @@ In the output directory, all written with owner-only permissions:
 | `inbox.mbox`, `sent.mbox`, `archive.mbox`, `spam.mbox`, `trash.mbox`, `starred.mbox` | Each folder as a standard mboxrd MBOX file that imports into Apple Mail, Thunderbird, and other clients |
 | `folder <name> <id>.mbox` | One MBOX file per folder you made, named after its full path |
 | `organization.json` | Your folders and labels with their names, colors and nesting, and which labels each message carries, matched by its `Message-ID` |
-| `private-key-encrypted.asc` | Your private key, still encrypted under the passphrase only your password can derive. Never written in the clear |
+| `private-key-encrypted.asc` | Your current private key, still encrypted under the passphrase only your password can derive. Never written in the clear |
+| `private-keys/<version>-<fingerprint>.asc` | Every private key your account has had, one file each, encrypted the same way. Mail received before a key change needs the older ones |
+| `keys.json` | Which key is which: version, fingerprint, algorithm, when each one was in use, and whether this export could unlock it |
 | `settings.json` | Your account settings and addresses |
 | `export-report.json` | What the export contains, and anything it could not get |
 | `.export-checkpoint.json` | Resume state. Safe to delete once the export is done |
@@ -33,10 +35,25 @@ the run, and **re-running the same command with the same `--out` retries whateve
 
 Anything it could fetch but could not read, such as ciphertext that does not decrypt, is listed
 under `lost`. The message is still written, with a short note in place of the attachment naming
-what is missing.
+what is missing. When the server recorded which key a message was encrypted to, the reason names
+that key, and says whether it is one of yours that would not unlock or one your account never had.
 
-While either list has anything in it the tool exits non-zero, leaves the server-side export
-session open so a scheduled deletion stays on hold, and does not report the export as complete.
+If you changed your key, the tool unlocks every key in your account's history so older mail still
+opens. The history has to run from version 1 to your current version with nothing missing, or the
+export stops. Your current key has to unlock or the export stops too. An older key that does not
+unlock is listed under `keyWarnings` in `export-report.json` and the export carries on; its file
+is still written to `private-keys/`.
+
+Before it finishes, the tool asks for your key list again. If a key was added or replaced while it
+ran, or the list cannot be fetched, `keyCheck` in `export-report.json` says so and you should run it
+again. You can keep the same `--out`: the tool remembers which keys a run used, and when they have
+changed it starts that folder over from the beginning, so mail it could not read with the old keys
+is fetched again.
+
+While `pending`, `lost` or `keyWarnings` has anything in it, or `keyCheck` is set, the tool exits
+non-zero and does not mark the export complete on the server. That is a report, not a lock: a
+scheduled deletion stays on hold while the tool runs and for 7 days after it last ran, whether the
+export finished or not. Check `export-report.json` and re-run within that window.
 
 ## Usage
 

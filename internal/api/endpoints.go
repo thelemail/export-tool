@@ -64,7 +64,6 @@ type LoginSessionGrant struct {
 	AccountID           string              `json:"accountId"`
 	AccessToken         string              `json:"accessToken"`
 	ExpiresInSeconds    int                 `json:"expiresInSeconds"`
-	EncryptedPrivateKey string              `json:"encryptedPrivateKey"`
 	WrappedMasterKey    []byte              `json:"wrappedMasterKey"`
 	MasterKeyID         []byte              `json:"masterKeyId"`
 	OpaqueParamsVersion int                 `json:"opaqueParamsVersion"`
@@ -91,6 +90,28 @@ func (c *Client) VerifyTOTP(ctx context.Context, pendingToken, code string) (Log
 func (c *Client) VerifyBackupCode(ctx context.Context, pendingToken, code string) (LoginSessionGrant, error) {
 	var out LoginSessionGrant
 	err := c.do(ctx, http.MethodPost, "/v1/auth/2fa/backup-code/verify", TwoFactorVerifyRequest{PendingToken: pendingToken, Code: code}, &out)
+	return out, err
+}
+
+type AccountKey struct {
+	KeyVersion          int        `json:"keyVersion"`
+	KeyFingerprint      string     `json:"keyFingerprint"`
+	KeyAlgorithm        string     `json:"keyAlgorithm"`
+	PublicKeyArmored    string     `json:"publicKeyArmored"`
+	EncryptedPrivateKey string     `json:"encryptedPrivateKey"`
+	IsCurrent           bool       `json:"isCurrent"`
+	ActivatedAt         *time.Time `json:"activatedAt"`
+	RetiredAt           *time.Time `json:"retiredAt"`
+}
+
+type AccountKeysResponse struct {
+	CurrentVersion int          `json:"currentVersion"`
+	Keys           []AccountKey `json:"keys"`
+}
+
+func (c *Client) ListMyKeys(ctx context.Context) (AccountKeysResponse, error) {
+	var out AccountKeysResponse
+	err := c.do(ctx, http.MethodGet, "/v1/me/keys", nil, &out)
 	return out, err
 }
 

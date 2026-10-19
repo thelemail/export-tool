@@ -3,6 +3,7 @@ package export
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,11 +26,13 @@ type fakeAttachment struct {
 	ordinal  int
 	key      string
 	isInline bool
+	keyFP    []byte
 }
 
 type fakeMessage struct {
 	id          string
 	bodyKey     string
+	bodyKeyFP   []byte
 	attachments []fakeAttachment
 	labelIDs    []string
 }
@@ -48,6 +51,8 @@ type fakeAPI struct {
 	epoch       int
 	bumpOnFetch bool
 	completed   bool
+	keys        api.AccountKeysResponse
+	keysStatus  int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -113,6 +118,15 @@ func (f *fakeAPI) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []string{"me@thelemail.com"})
 	case r.URL.Path == "/v1/lifecycle/export/heartbeat":
 		writeJSON(w, map[string]string{"sessionId": "sess-1", "expiresAt": time.Now().Format(time.RFC3339)})
+	case r.URL.Path == "/v1/me/keys":
+		f.mu.Lock()
+		keys, status := f.keys, f.keysStatus
+		f.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
+		writeJSON(w, keys)
 	case r.URL.Path == "/v1/lifecycle/export/complete":
 		f.mu.Lock()
 		f.completed = true
@@ -202,19 +216,23 @@ func (f *fakeAPI) serveDetail(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	pointer := func(key string) map[string]any {
-		return map[string]any{
+	pointer := func(key string, fp []byte) map[string]any {
+		p := map[string]any{
 			"url":       fmt.Sprintf("%s/blob/%s?epoch=%d", f.srv.URL, key, epoch),
 			"expiresAt": time.Now().Add(time.Minute).Format(time.RFC3339),
 			"sizeBytes": 0,
 		}
+		if len(fp) > 0 {
+			p["keyFingerprint"] = fp
+		}
+		return p
 	}
 	atts := []map[string]any{}
 	for _, a := range m.attachments {
 		atts = append(atts, map[string]any{
 			"id":       a.id,
 			"ordinal":  a.ordinal,
-			"pointer":  pointer(a.key),
+			"pointer":  pointer(a.key, a.keyFP),
 			"isInline": a.isInline,
 		})
 	}
@@ -222,7 +240,7 @@ func (f *fakeAPI) serveDetail(w http.ResponseWriter, r *http.Request) {
 		"id":          m.id,
 		"source":      "internal",
 		"encrypted":   false,
-		"body":        pointer(m.bodyKey),
+		"body":        pointer(m.bodyKey, m.bodyKeyFP),
 		"attachments": atts,
 	})
 }
@@ -252,7 +270,12 @@ func newExporter(t *testing.T, f *fakeAPI, key *testKey, dir string) *Exporter {
 	client.MaxAttempts = 2
 	client.Backoff = time.Millisecond
 	client.SetSession("token", "account")
-	return &Exporter{Client: client, Vault: key.vault, OutDir: dir, Session: "sess-1"}
+	fp := hex.EncodeToString(key.entity.PrimaryKey.Fingerprint)
+	f.mu.Lock()
+	f.keys = api.AccountKeysResponse{CurrentVersion: 1, Keys: []api.AccountKey{{KeyVersion: 1, KeyFingerprint: fp, IsCurrent: true}}}
+	f.mu.Unlock()
+	keys := []AccountKey{{Version: 1, Fingerprint: fp, Current: true, Fingerprints: []string{fp}}}
+	return &Exporter{Client: client, Vault: key.vault, OutDir: dir, Session: "sess-1", Keys: keys}
 }
 
 func readFile(t *testing.T, path string) string {
