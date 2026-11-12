@@ -3,7 +3,7 @@ module github.com/thelemail/export-tool
 go 1.27.4
 
 require (
-	github.com/thelemail/trust v0.2.0
+	github.com/thelemail/trust v0.3.0
 	golang.org/x/term v0.47.0
 )
 
