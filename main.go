@@ -151,6 +151,9 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 		return fmt.Errorf("unlock mailbox key: %w", err)
 	}
 	printKeys(accountKeys)
+	if _, err := export.VerifyProductKeys(ctx, client, keys, init.AccountID); err != nil {
+		return fmt.Errorf("verify account keys: %w", err)
+	}
 
 	var session string
 	if hb, err := client.ExportHeartbeat(ctx, ""); err == nil {
