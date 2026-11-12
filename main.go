@@ -151,6 +151,13 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 		return fmt.Errorf("unlock mailbox key: %w", err)
 	}
 	printKeys(accountKeys)
+	var refused *export.ProductKeysRefused
+	switch _, err := export.VerifyProductKeys(ctx, client, keys, init.AccountID); {
+	case errors.As(err, &refused) && !refused.Enforced:
+		fmt.Fprintln(os.Stderr, "warning: account keys did not verify:", err)
+	case err != nil:
+		return fmt.Errorf("verify account keys: %w", err)
+	}
 
 	var session string
 	if hb, err := client.ExportHeartbeat(ctx, ""); err == nil {

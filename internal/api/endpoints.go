@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -207,4 +209,65 @@ func (c *Client) ExportHeartbeat(ctx context.Context, sessionID string) (ExportH
 
 func (c *Client) ExportComplete(ctx context.Context, sessionID string) error {
 	return c.do(ctx, http.MethodPost, "/v1/lifecycle/export/complete", map[string]string{"sessionId": sessionID}, nil)
+}
+
+type CryptoAccountHead struct {
+	Version             int    `json:"version"`
+	StateRevision       int64  `json:"stateRevision"`
+	Head                []byte `json:"head"`
+	PreviousHeadHash    []byte `json:"previousHeadHash"`
+	AuthoritySignature  []byte `json:"authoritySignature"`
+	LegacySignature     []byte `json:"legacySignature"`
+	TransitionSignature []byte `json:"transitionSignature"`
+	MAC                 []byte `json:"mac"`
+}
+
+type AccountAuthorityKey struct {
+	PublicKey []byte `json:"publicKey"`
+}
+
+type ProductManifestPage struct {
+	Record    []byte `json:"record"`
+	Signature []byte `json:"signature"`
+}
+
+type ProductDelegation struct {
+	Record           []byte `json:"record"`
+	Signature        []byte `json:"signature"`
+	SigningPublicKey []byte `json:"signingPublicKey"`
+}
+
+type ProductKeysResponse struct {
+	Product           string                `json:"product"`
+	NativeEnforcement bool                  `json:"nativeEnforcement"`
+	Head              *CryptoAccountHead    `json:"head"`
+	AuthorityKey      *AccountAuthorityKey  `json:"authorityKey"`
+	IdentityManifest  *ProductManifestPage  `json:"identityManifest"`
+	DataManifest      []ProductManifestPage `json:"dataManifest"`
+	Delegation        *ProductDelegation    `json:"delegation"`
+}
+
+type ProductBundleResponse struct {
+	BundleID       string `json:"bundleId"`
+	BundleRevision int64  `json:"bundleRevision"`
+	Bundle         []byte `json:"bundle"`
+}
+
+func (c *Client) ProductKeys(ctx context.Context, product string) (ProductKeysResponse, error) {
+	var out ProductKeysResponse
+	err := c.do(ctx, http.MethodGet, "/v1/me/product-keys/"+url.PathEscape(product), nil, &out)
+	return out, err
+}
+
+func (c *Client) ProductRootDescriptor(ctx context.Context, product string) (ProductBundleResponse, error) {
+	var out ProductBundleResponse
+	err := c.do(ctx, http.MethodGet, "/v1/me/product-keys/"+url.PathEscape(product)+"/root-descriptor", nil, &out)
+	return out, err
+}
+
+func (c *Client) ProductBundle(ctx context.Context, product, bundleID string, revision int64) (ProductBundleResponse, error) {
+	var out ProductBundleResponse
+	path := fmt.Sprintf("/v1/me/product-keys/%s/bundles/%s/revisions/%d", url.PathEscape(product), url.PathEscape(bundleID), revision)
+	err := c.do(ctx, http.MethodGet, path, nil, &out)
+	return out, err
 }
