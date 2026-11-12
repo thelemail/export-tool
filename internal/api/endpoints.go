@@ -238,12 +238,13 @@ type ProductDelegation struct {
 }
 
 type ProductKeysResponse struct {
-	Product          string                `json:"product"`
-	Head             *CryptoAccountHead    `json:"head"`
-	AuthorityKey     *AccountAuthorityKey  `json:"authorityKey"`
-	IdentityManifest *ProductManifestPage  `json:"identityManifest"`
-	DataManifest     []ProductManifestPage `json:"dataManifest"`
-	Delegation       *ProductDelegation    `json:"delegation"`
+	Product           string                `json:"product"`
+	NativeEnforcement bool                  `json:"nativeEnforcement"`
+	Head              *CryptoAccountHead    `json:"head"`
+	AuthorityKey      *AccountAuthorityKey  `json:"authorityKey"`
+	IdentityManifest  *ProductManifestPage  `json:"identityManifest"`
+	DataManifest      []ProductManifestPage `json:"dataManifest"`
+	Delegation        *ProductDelegation    `json:"delegation"`
 }
 
 type ProductBundleResponse struct {

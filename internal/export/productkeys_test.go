@@ -21,15 +21,17 @@ type productKeysServer struct {
 	noHead  bool
 	noRoot  bool
 	badMAC  bool
+	enforce bool
 }
 
 func (s productKeysServer) ProductKeys(_ context.Context, product string) (api.ProductKeysResponse, error) {
 	pk := s.account.ProductKeys
 	out := api.ProductKeysResponse{
-		Product:          product,
-		AuthorityKey:     &api.AccountAuthorityKey{PublicKey: pk.AuthorityKey.PublicKey},
-		IdentityManifest: &api.ProductManifestPage{Record: pk.IdentityManifest.Record, Signature: pk.IdentityManifest.Signature},
-		Delegation:       &api.ProductDelegation{Record: pk.Delegation.Record, Signature: pk.Delegation.Signature, SigningPublicKey: pk.Delegation.SigningPublicKey},
+		Product:           product,
+		NativeEnforcement: s.enforce,
+		AuthorityKey:      &api.AccountAuthorityKey{PublicKey: pk.AuthorityKey.PublicKey},
+		IdentityManifest:  &api.ProductManifestPage{Record: pk.IdentityManifest.Record, Signature: pk.IdentityManifest.Signature},
+		Delegation:        &api.ProductDelegation{Record: pk.Delegation.Record, Signature: pk.Delegation.Signature, SigningPublicKey: pk.Delegation.SigningPublicKey},
 	}
 	for _, p := range pk.DataManifest {
 		out.DataManifest = append(out.DataManifest, api.ProductManifestPage{Record: p.Record, Signature: p.Signature})
@@ -116,8 +118,12 @@ func TestVerifyProductKeysSkipsAccountsWithoutAHead(t *testing.T) {
 
 func TestVerifyProductKeysRefusesWhatItCannotVerify(t *testing.T) {
 	store, account := newProductKeysAccount(t)
-	if _, err := VerifyProductKeys(context.Background(), productKeysServer{account: account, badMAC: true}, store, testAccountID); err == nil {
-		t.Fatal("accepted a forged head mac")
+	for _, enforce := range []bool{false, true} {
+		var refused *ProductKeysRefused
+		_, err := VerifyProductKeys(context.Background(), productKeysServer{account: account, badMAC: true, enforce: enforce}, store, testAccountID)
+		if !errors.As(err, &refused) || refused.Enforced != enforce {
+			t.Fatalf("forged head mac with enforcement %v gave %v", enforce, err)
+		}
 	}
 	var httpErr *api.HTTPError
 	if _, err := VerifyProductKeys(context.Background(), productKeysServer{account: account, noRoot: true}, store, testAccountID); !errors.As(err, &httpErr) {

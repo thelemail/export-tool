@@ -10,6 +10,15 @@ import (
 	"github.com/thelemail/export-tool/internal/api"
 )
 
+type ProductKeysRefused struct {
+	Err      error
+	Enforced bool
+}
+
+func (e *ProductKeysRefused) Error() string { return e.Err.Error() }
+
+func (e *ProductKeysRefused) Unwrap() error { return e.Err }
+
 type ProductKeysClient interface {
 	ProductKeys(ctx context.Context, product string) (api.ProductKeysResponse, error)
 	ProductRootDescriptor(ctx context.Context, product string) (api.ProductBundleResponse, error)
@@ -68,6 +77,9 @@ func VerifyProductKeys(ctx context.Context, client ProductKeysClient, store *vau
 		SecretBundles: []productkeys.StoredBundle{{BundleID: root.BundleID, Revision: root.BundleRevision, Bundle: root.Bundle}},
 		Products:      []productkeys.ProductInput{product},
 	})
+	if productkeys.IsVerificationError(err) {
+		return false, &ProductKeysRefused{Err: err, Enforced: pk.NativeEnforcement}
+	}
 	if err != nil {
 		return false, err
 	}
