@@ -1,9 +1,7 @@
 package export
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,86 +12,93 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProtonMail/go-crypto/openpgp"
-	"github.com/ProtonMail/go-crypto/openpgp/armor"
-	"github.com/ProtonMail/go-crypto/openpgp/packet"
+	"github.com/thelemail/trust/opaque"
+	"github.com/thelemail/trust/pgp"
+	"github.com/thelemail/trust/vault"
 
 	"github.com/thelemail/export-tool/internal/api"
-	"github.com/thelemail/export-tool/internal/crypto"
 )
 
 const vaultPassphrase = "vault-passphrase"
 
-var (
-	v4KeyConfig = &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA, Curve: packet.Curve25519}
-	v6KeyConfig = &packet.Config{V6Keys: true, Algorithm: packet.PubKeyAlgoEd25519}
+type keyKind int
+
+const (
+	v6Key keyKind = iota
+	v4KeyFirst
+	v4KeySecond
 )
 
 type accountKeyFixture struct {
-	entity  *openpgp.Entity
+	key     *pgp.Key
 	private string
 	public  string
 }
 
 func (k accountKeyFixture) fingerprint() string {
-	return hex.EncodeToString(k.entity.PrimaryKey.Fingerprint)
+	return k.key.Fingerprint()
+}
+
+func (k accountKeyFixture) fingerprintBytes() []byte {
+	return k.key.Entity.PrimaryKey.Fingerprint
 }
 
 func (k accountKeyFixture) encrypt(t *testing.T, plaintext string) []byte {
 	t.Helper()
-	var buf bytes.Buffer
-	w, err := openpgp.Encrypt(&buf, []*openpgp.Entity{k.entity}, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-	if _, err := w.Write([]byte(plaintext)); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	return buf.Bytes()
+	return encryptTo(t, k.key, []byte(plaintext))
 }
 
-func newAccountKey(t *testing.T, cfg *packet.Config, passphrase string) accountKeyFixture {
+func newAccountKey(t *testing.T, kind keyKind, passphrase string) accountKeyFixture {
 	t.Helper()
-	entity, err := openpgp.NewEntity("Me", "", "me@thelemail.com", cfg)
-	if err != nil {
-		t.Fatalf("new entity: %v", err)
+	var key *pgp.Key
+	switch kind {
+	case v4KeyFirst, v4KeySecond:
+		name := map[keyKind]string{v4KeyFirst: "v4-key-first.asc", v4KeySecond: "v4-key-second.asc"}[kind]
+		raw, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err = pgp.ParseKey(string(raw))
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+	default:
+		var err error
+		key, err = pgp.Generate("Me", "me@thelemail.test", time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
 	}
-	var pub bytes.Buffer
-	pw, err := armor.Encode(&pub, openpgp.PublicKeyType, nil)
-	if err != nil {
-		t.Fatalf("armor: %v", err)
-	}
-	if err := entity.Serialize(pw); err != nil {
-		t.Fatalf("serialize public: %v", err)
-	}
-	if err := pw.Close(); err != nil {
-		t.Fatalf("close armor: %v", err)
-	}
-	if err := entity.EncryptPrivateKeys([]byte(passphrase), cfg); err != nil {
+	if err := key.Lock([]byte(passphrase)); err != nil {
 		t.Fatalf("lock key: %v", err)
 	}
-	var priv bytes.Buffer
-	w, err := armor.Encode(&priv, openpgp.PrivateKeyType, nil)
+	private, err := key.ArmorPrivate()
 	if err != nil {
-		t.Fatalf("armor: %v", err)
+		t.Fatalf("armor private: %v", err)
 	}
-	if err := entity.SerializePrivateWithoutSigning(w, nil); err != nil {
-		t.Fatalf("serialize private: %v", err)
+	public, err := key.ArmorPublic()
+	if err != nil {
+		t.Fatalf("armor public: %v", err)
 	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close armor: %v", err)
+	check, err := pgp.ParseKey(private)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
 	}
-	if _, err := crypto.UnlockVault(priv.String(), []byte(passphrase)); err != nil {
+	if err := check.Unlock([]byte(passphrase)); err != nil {
 		t.Fatalf("fixture does not unlock: %v", err)
 	}
-	reread, err := openpgp.ReadArmoredKeyRing(strings.NewReader(pub.String()))
+	reread, err := pgp.ParseKey(public)
 	if err != nil {
 		t.Fatalf("reread public: %v", err)
 	}
-	return accountKeyFixture{entity: reread[0], private: priv.String(), public: pub.String()}
+	return accountKeyFixture{key: reread, private: private, public: public}
+}
+
+func unlockWithPassphrase(resp api.AccountKeysResponse, passphrase string) (*Vault, []AccountKey, error) {
+	store := vault.NewStore(opaque.NewStore())
+	return UnlockAccountKeys(store, testAccountID, resp, func(set vault.KeySet) error {
+		return store.OpenKeys(testAccountID, set, []byte(passphrase), nil)
+	})
 }
 
 func listed(version int, current bool, k accountKeyFixture) api.AccountKey {
@@ -107,7 +112,7 @@ func listed(version int, current bool, k accountKeyFixture) api.AccountKey {
 		IsCurrent:           current,
 		ActivatedAt:         &activated,
 	}
-	if k.entity.PrimaryKey.Version == 4 {
+	if k.key.Version() == 4 {
 		key.KeyAlgorithm = "openpgp-ed25519"
 	}
 	if !current {
@@ -125,9 +130,9 @@ type keyHistory struct {
 func newKeyHistory(t *testing.T) keyHistory {
 	t.Helper()
 	h := keyHistory{
-		v4:      newAccountKey(t, v4KeyConfig, vaultPassphrase),
-		v6:      newAccountKey(t, v6KeyConfig, vaultPassphrase),
-		current: newAccountKey(t, v6KeyConfig, vaultPassphrase),
+		v4:      newAccountKey(t, v4KeyFirst, vaultPassphrase),
+		v6:      newAccountKey(t, v6Key, vaultPassphrase),
+		current: newAccountKey(t, v6Key, vaultPassphrase),
 	}
 	h.resp = api.AccountKeysResponse{
 		CurrentVersion: 3,
@@ -143,7 +148,7 @@ func newKeyHistory(t *testing.T) keyHistory {
 func TestUnlockAccountKeysOpensV4AndV6History(t *testing.T) {
 	h := newKeyHistory(t)
 
-	vault, keys, err := UnlockAccountKeys(h.resp, []byte(vaultPassphrase))
+	vault, keys, err := unlockWithPassphrase(h.resp, vaultPassphrase)
 	if err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
@@ -171,10 +176,10 @@ func TestUnlockAccountKeysOpensV4AndV6History(t *testing.T) {
 
 func TestUnlockAccountKeysFailsWhenTheCurrentKeyDoesNotUnlock(t *testing.T) {
 	h := newKeyHistory(t)
-	h.current = newAccountKey(t, v6KeyConfig, "someone else")
+	h.current = newAccountKey(t, v6Key, "someone else")
 	h.resp.Keys[0] = listed(3, true, h.current)
 
-	_, _, err := UnlockAccountKeys(h.resp, []byte(vaultPassphrase))
+	_, _, err := unlockWithPassphrase(h.resp, vaultPassphrase)
 	if err == nil || !strings.Contains(err.Error(), "unlock current key") {
 		t.Fatalf("err = %v", err)
 	}
@@ -182,11 +187,11 @@ func TestUnlockAccountKeysFailsWhenTheCurrentKeyDoesNotUnlock(t *testing.T) {
 
 func TestUnlockAccountKeysReportsHistoryKeysThatDoNotUnlock(t *testing.T) {
 	h := newKeyHistory(t)
-	stranger := newAccountKey(t, v4KeyConfig, "someone else")
+	stranger := newAccountKey(t, v4KeySecond, "someone else")
 	h.resp.Keys[1] = listed(1, false, stranger)
 	h.resp.Keys[2].EncryptedPrivateKey = "not a key"
 
-	vault, keys, err := UnlockAccountKeys(h.resp, []byte(vaultPassphrase))
+	vault, keys, err := unlockWithPassphrase(h.resp, vaultPassphrase)
 	if err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
@@ -233,7 +238,7 @@ func TestUnlockAccountKeysRejectsAnInconsistentList(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			resp := api.AccountKeysResponse{CurrentVersion: h.resp.CurrentVersion, Keys: append([]api.AccountKey(nil), h.resp.Keys...)}
 			tc.mutate(&resp)
-			_, _, err := UnlockAccountKeys(resp, []byte(vaultPassphrase))
+			_, _, err := unlockWithPassphrase(resp, vaultPassphrase)
 			if err == nil {
 				t.Fatalf("expected an error containing %q", tc.want)
 			}
@@ -248,7 +253,7 @@ func TestUnlockAccountKeysReportsAHistoryKeyWithNoPrivateKey(t *testing.T) {
 	h := newKeyHistory(t)
 	h.resp.Keys[2].EncryptedPrivateKey = ""
 
-	_, keys, err := UnlockAccountKeys(h.resp, []byte(vaultPassphrase))
+	_, keys, err := unlockWithPassphrase(h.resp, vaultPassphrase)
 	if err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
@@ -269,7 +274,7 @@ func TestUnlockAccountKeysReportsAHistoryKeyWithNoPrivateKey(t *testing.T) {
 
 func historyExporter(t *testing.T, f *fakeAPI, resp api.AccountKeysResponse, dir string) *Exporter {
 	t.Helper()
-	vault, keys, err := UnlockAccountKeys(resp, []byte(vaultPassphrase))
+	vault, keys, err := unlockWithPassphrase(resp, vaultPassphrase)
 	if err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
@@ -299,9 +304,9 @@ func TestRunExportsEveryKeyAndDecryptsBothGenerations(t *testing.T) {
 	f.put("body-v6", h.v6.encrypt(t, mailBody("Between rotations")))
 	f.put("body-now", h.current.encrypt(t, mailBody("After rotation")))
 	f.add("inbox", []fakeMessage{
-		{id: "m1", bodyKey: "body-v4", bodyKeyFP: h.v4.entity.PrimaryKey.Fingerprint},
-		{id: "m2", bodyKey: "body-v6", bodyKeyFP: h.v6.entity.PrimaryKey.Fingerprint},
-		{id: "m3", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint},
+		{id: "m1", bodyKey: "body-v4", bodyKeyFP: h.v4.fingerprintBytes()},
+		{id: "m2", bodyKey: "body-v6", bodyKeyFP: h.v6.fingerprintBytes()},
+		{id: "m3", bodyKey: "body-now", bodyKeyFP: h.current.fingerprintBytes()},
 	})
 	dir := t.TempDir()
 
@@ -364,9 +369,9 @@ func TestRunExportsEveryKeyAndDecryptsBothGenerations(t *testing.T) {
 
 func TestRunReportsMailEncryptedToKeysItCannotUse(t *testing.T) {
 	h := newKeyHistory(t)
-	locked := newAccountKey(t, v4KeyConfig, "lost passphrase")
+	locked := newAccountKey(t, v4KeySecond, "lost passphrase")
 	h.resp.Keys[1] = listed(1, false, locked)
-	stranger := newAccountKey(t, v6KeyConfig, vaultPassphrase)
+	stranger := newAccountKey(t, v6Key, vaultPassphrase)
 
 	f := newFakeAPI(t)
 	f.put("body-locked", locked.encrypt(t, mailBody("Old")))
@@ -374,14 +379,14 @@ func TestRunReportsMailEncryptedToKeysItCannotUse(t *testing.T) {
 	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
 	f.put("att-stranger", stranger.encrypt(t, "frame"))
 	f.add("inbox", []fakeMessage{
-		{id: "m1", bodyKey: "body-locked", bodyKeyFP: locked.entity.PrimaryKey.Fingerprint},
-		{id: "m2", bodyKey: "body-stranger", bodyKeyFP: stranger.entity.PrimaryKey.Fingerprint},
+		{id: "m1", bodyKey: "body-locked", bodyKeyFP: locked.fingerprintBytes()},
+		{id: "m2", bodyKey: "body-stranger", bodyKeyFP: stranger.fingerprintBytes()},
 		{
 			id:        "m3",
 			bodyKey:   "body-now",
-			bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint,
+			bodyKeyFP: h.current.fingerprintBytes(),
 			attachments: []fakeAttachment{{
-				id: "a1", key: "att-stranger", keyFP: stranger.entity.PrimaryKey.Fingerprint,
+				id: "a1", key: "att-stranger", keyFP: stranger.fingerprintBytes(),
 			}},
 		},
 	})
@@ -422,12 +427,12 @@ func TestRunReportsMailEncryptedToKeysItCannotUse(t *testing.T) {
 
 func TestRunKeepsTheSessionOpenWhenAnOldKeyDoesNotUnlock(t *testing.T) {
 	h := newKeyHistory(t)
-	locked := newAccountKey(t, v4KeyConfig, "lost passphrase")
+	locked := newAccountKey(t, v4KeySecond, "lost passphrase")
 	h.resp.Keys[1] = listed(1, false, locked)
 
 	f := newFakeAPI(t)
 	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
-	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.fingerprintBytes()}})
 	dir := t.TempDir()
 
 	err := historyExporter(t, f, h.resp, dir).Run(context.Background())
@@ -455,12 +460,12 @@ func TestRunKeepsTheSessionOpenWhenTheKeysChangeDuringTheExport(t *testing.T) {
 		want   string
 	}{
 		"rotated": {func(t *testing.T, f *fakeAPI, h keyHistory) {
-			next := newAccountKey(t, v6KeyConfig, vaultPassphrase)
+			next := newAccountKey(t, v6Key, vaultPassphrase)
 			retired := listed(3, false, h.current)
 			f.keys = api.AccountKeysResponse{CurrentVersion: 4, Keys: []api.AccountKey{listed(4, true, next), retired, h.resp.Keys[1], h.resp.Keys[2]}}
 		}, keysChanged},
 		"replaced": {func(t *testing.T, f *fakeAPI, h keyHistory) {
-			other := listed(1, false, newAccountKey(t, v4KeyConfig, vaultPassphrase))
+			other := listed(1, false, newAccountKey(t, v4KeySecond, vaultPassphrase))
 			f.keys = api.AccountKeysResponse{CurrentVersion: 3, Keys: []api.AccountKey{h.resp.Keys[0], other, h.resp.Keys[2]}}
 		}, keysChanged},
 		"invalid": {func(t *testing.T, f *fakeAPI, h keyHistory) {
@@ -475,7 +480,7 @@ func TestRunKeepsTheSessionOpenWhenTheKeysChangeDuringTheExport(t *testing.T) {
 			h := newKeyHistory(t)
 			f := newFakeAPI(t)
 			f.put("body-now", h.current.encrypt(t, mailBody("Now")))
-			f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+			f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.fingerprintBytes()}})
 			dir := t.TempDir()
 			e := historyExporter(t, f, h.resp, dir)
 			f.mu.Lock()
@@ -501,7 +506,7 @@ func TestRunClosesTheSessionWhenTheKeysAreUnchanged(t *testing.T) {
 	h := newKeyHistory(t)
 	f := newFakeAPI(t)
 	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
-	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.fingerprintBytes()}})
 	dir := t.TempDir()
 
 	if err := historyExporter(t, f, h.resp, dir).Run(context.Background()); err != nil {
@@ -517,7 +522,7 @@ func TestRunClosesTheSessionWhenTheKeysAreUnchanged(t *testing.T) {
 
 func TestRunStartsOverInTheSameFolderAfterTheKeysChange(t *testing.T) {
 	h := newKeyHistory(t)
-	next := newAccountKey(t, v6KeyConfig, vaultPassphrase)
+	next := newAccountKey(t, v6Key, vaultPassphrase)
 	rotated := api.AccountKeysResponse{CurrentVersion: 4, Keys: []api.AccountKey{
 		listed(4, true, next), listed(3, false, h.current), h.resp.Keys[1], h.resp.Keys[2],
 	}}
@@ -526,8 +531,8 @@ func TestRunStartsOverInTheSameFolderAfterTheKeysChange(t *testing.T) {
 	f.put("body-now", h.current.encrypt(t, mailBody("Before")))
 	f.put("body-next", next.encrypt(t, mailBody("After")))
 	f.add("inbox", []fakeMessage{
-		{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint},
-		{id: "m2", bodyKey: "body-next", bodyKeyFP: next.entity.PrimaryKey.Fingerprint},
+		{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.fingerprintBytes()},
+		{id: "m2", bodyKey: "body-next", bodyKeyFP: next.fingerprintBytes()},
 	})
 	dir := t.TempDir()
 
@@ -565,7 +570,7 @@ func TestRunDropsFoldersThatAreGoneWhenItStartsOver(t *testing.T) {
 	h := newKeyHistory(t)
 	f := newFakeAPI(t)
 	f.put("body-now", h.current.encrypt(t, mailBody("Now")))
-	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.entity.PrimaryKey.Fingerprint}})
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body-now", bodyKeyFP: h.current.fingerprintBytes()}})
 	dir := t.TempDir()
 
 	stale := `{"keySet":"stale","done":{"inbox":true,"f-gone":true},"offsets":{"inbox":40,"f-gone":40},"totals":{"inbox":{"messages":1}}}`

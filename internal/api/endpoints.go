@@ -115,19 +115,18 @@ func (c *Client) ListMyKeys(ctx context.Context) (AccountKeysResponse, error) {
 	return out, err
 }
 
-type PresignedPointer struct {
-	URL            string    `json:"url"`
-	ExpiresAt      time.Time `json:"expiresAt"`
-	SizeBytes      int64     `json:"sizeBytes"`
-	SHA256         []byte    `json:"sha256"`
-	KeyFingerprint []byte    `json:"keyFingerprint"`
+type BlobPointer struct {
+	Path           string `json:"path"`
+	SizeBytes      int64  `json:"sizeBytes"`
+	SHA256         []byte `json:"sha256"`
+	KeyFingerprint []byte `json:"keyFingerprint"`
 }
 
 type AttachmentDetail struct {
-	ID       string           `json:"id"`
-	Ordinal  int              `json:"ordinal"`
-	Pointer  PresignedPointer `json:"pointer"`
-	IsInline bool             `json:"isInline"`
+	ID       string      `json:"id"`
+	Ordinal  int         `json:"ordinal"`
+	Pointer  BlobPointer `json:"pointer"`
+	IsInline bool        `json:"isInline"`
 }
 
 type MessageSummary struct {
@@ -150,7 +149,7 @@ type MessageDetail struct {
 	ID          string             `json:"id"`
 	Source      string             `json:"source"`
 	Encrypted   bool               `json:"encrypted"`
-	Body        PresignedPointer   `json:"body"`
+	Body        BlobPointer        `json:"body"`
 	Attachments []AttachmentDetail `json:"attachments"`
 }
 

@@ -3,7 +3,6 @@ package export
 import (
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,8 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thelemail/trust/attframe"
+
 	"github.com/thelemail/export-tool/internal/api"
-	"github.com/thelemail/export-tool/internal/attframe"
 )
 
 type fakeAttachment struct {
@@ -48,8 +48,8 @@ type fakeAPI struct {
 	messages    map[string]fakeMessage
 	listStatus  map[string]int
 	collections []map[string]any
-	epoch       int
-	bumpOnFetch bool
+	pointerBase string
+	blobCalls   int
 	completed   bool
 	keys        api.AccountKeysResponse
 	keysStatus  int
@@ -63,7 +63,6 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		pages:      map[string][][]fakeMessage{},
 		messages:   map[string]fakeMessage{},
 		listStatus: map[string]int{},
-		epoch:      1,
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.route))
 	t.Cleanup(f.srv.Close)
@@ -142,15 +141,15 @@ func (f *fakeAPI) serveBlob(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/blob/")
 	status := f.blobStatus[key]
 	blob, ok := f.blobs[key]
-	stale := r.URL.Query().Get("epoch") != fmt.Sprint(f.epoch)
+	f.blobCalls++
 	f.mu.Unlock()
 
-	if status != 0 {
-		w.WriteHeader(status)
+	if r.Header.Get("Authorization") != "Bearer token" || r.Header.Get("X-Account-Id") != "account" {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if stale {
-		w.WriteHeader(http.StatusForbidden)
+	if status != 0 {
+		w.WriteHeader(status)
 		return
 	}
 	if !ok {
@@ -206,11 +205,7 @@ func (f *fakeAPI) serveDetail(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/messages/")
 	f.mu.Lock()
 	m, ok := f.messages[id]
-	if f.bumpOnFetch {
-		f.epoch++
-		f.bumpOnFetch = false
-	}
-	epoch := f.epoch
+	base := f.pointerBase
 	f.mu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
@@ -218,8 +213,7 @@ func (f *fakeAPI) serveDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	pointer := func(key string, fp []byte) map[string]any {
 		p := map[string]any{
-			"url":       fmt.Sprintf("%s/blob/%s?epoch=%d", f.srv.URL, key, epoch),
-			"expiresAt": time.Now().Add(time.Minute).Format(time.RFC3339),
+			"path":      base + "/blob/" + key,
 			"sizeBytes": 0,
 		}
 		if len(fp) > 0 {
@@ -270,7 +264,7 @@ func newExporter(t *testing.T, f *fakeAPI, key *testKey, dir string) *Exporter {
 	client.MaxAttempts = 2
 	client.Backoff = time.Millisecond
 	client.SetSession("token", "account")
-	fp := hex.EncodeToString(key.entity.PrimaryKey.Fingerprint)
+	fp := key.key.Fingerprint()
 	f.mu.Lock()
 	f.keys = api.AccountKeysResponse{CurrentVersion: 1, Keys: []api.AccountKey{{KeyVersion: 1, KeyFingerprint: fp, IsCurrent: true}}}
 	f.mu.Unlock()
@@ -422,13 +416,10 @@ func TestRunHoldsBackMessagesWithTransientFailures(t *testing.T) {
 	}
 }
 
-func TestRunRefreshesExpiredPointers(t *testing.T) {
+func TestRunStreamsBlobsThroughTheAPIWithTheSession(t *testing.T) {
 	f := newFakeAPI(t)
 	key := newTestKey(t)
 	seedOneMessageWithAttachment(t, f, key)
-	f.mu.Lock()
-	f.bumpOnFetch = true
-	f.mu.Unlock()
 	dir := t.TempDir()
 
 	if err := newExporter(t, f, key, dir).Run(context.Background()); err != nil {
@@ -437,6 +428,33 @@ func TestRunRefreshesExpiredPointers(t *testing.T) {
 	mbox := readFile(t, filepath.Join(dir, "inbox.mbox"))
 	if _, ok := findPart(flatten(t, strings.SplitN(mbox, "\n", 2)[1]), "invoice.pdf"); !ok {
 		t.Fatalf("attachment missing:\n%s", mbox)
+	}
+	if f.blobCalls != 2 {
+		t.Fatalf("blob requests = %d, want body and attachment", f.blobCalls)
+	}
+}
+
+func TestRunRefusesPointersThatLeaveTheAPI(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a blob request reached another host with %q", r.Header.Get("Authorization"))
+	}))
+	t.Cleanup(elsewhere.Close)
+	f := newFakeAPI(t)
+	f.pointerBase = elsewhere.URL
+	key := newTestKey(t)
+	seedOneMessageWithAttachment(t, f, key)
+	dir := t.TempDir()
+
+	err := newExporter(t, f, key, dir).Run(context.Background())
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("err = %v", err)
+	}
+	r := readReport(t, dir)
+	if len(r.Lost) != 1 || len(r.Pending) != 0 || !strings.Contains(r.Lost[0].Error, "not a path on this API") {
+		t.Fatalf("report = %+v", r)
+	}
+	if f.blobCalls != 0 {
+		t.Fatalf("blob requests = %d", f.blobCalls)
 	}
 }
 

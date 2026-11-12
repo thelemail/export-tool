@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,7 +29,7 @@ func TestGetBlobRetriesServerErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := testClient(srv).GetBlob(context.Background(), srv.URL+"/blob")
+	body, err := testClient(srv).GetBlob(context.Background(), "/blob")
 	if err != nil {
 		t.Fatalf("get blob: %v", err)
 	}
@@ -48,11 +49,9 @@ func TestGetBlobDoesNotRetryClientErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := testClient(srv).GetBlob(context.Background(), srv.URL+"/blob")
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if !IsExpiredPointer(err) {
+	_, err := testClient(srv).GetBlob(context.Background(), "/blob")
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusForbidden {
 		t.Fatalf("err = %v", err)
 	}
 	if Retryable(err) {
@@ -137,18 +136,46 @@ func TestTransportErrorsAreRetryable(t *testing.T) {
 	}
 }
 
-func TestTransportErrorsDropPresignedQueryStrings(t *testing.T) {
-	c := New("http://127.0.0.1:1", "")
-	c.MaxAttempts = 1
-	_, err := c.GetBlob(context.Background(), "http://127.0.0.1:1/blob/x.pgp?X-Amz-Signature=deadbeef&X-Amz-Expires=60")
-	if err == nil {
-		t.Fatal("expected an error")
+func TestGetBlobSendsTheSessionToTheAPI(t *testing.T) {
+	var auth, account, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth, account, path = r.Header.Get("Authorization"), r.Header.Get("X-Account-Id"), r.URL.Path
+		_, _ = w.Write([]byte("ciphertext"))
+	}))
+	defer srv.Close()
+	c := testClient(srv)
+	c.SetSession("tok", "acct")
+	body, err := c.GetBlob(context.Background(), "/v1/messages/m1/body")
+	if err != nil || string(body) != "ciphertext" {
+		t.Fatalf("body = %q, err = %v", body, err)
 	}
-	if strings.Contains(err.Error(), "X-Amz-Signature") {
-		t.Fatalf("error leaks the presigned query: %v", err)
+	if auth != "Bearer tok" || account != "acct" || path != "/v1/messages/m1/body" {
+		t.Fatalf("auth = %q, account = %q, path = %q", auth, account, path)
 	}
-	if !strings.Contains(err.Error(), "/blob/x.pgp") {
-		t.Fatalf("error lost the object path: %v", err)
+}
+
+func TestGetBlobRefusesPathsOffTheAPI(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+	}))
+	defer srv.Close()
+	c := testClient(srv)
+	c.SetSession("tok", "acct")
+	for _, p := range []string{
+		"",
+		"v1/messages/m1/body",
+		"https://elsewhere.test/v1/messages/m1/body",
+		"//elsewhere.test/v1/messages/m1/body",
+		"/\\elsewhere.test/v1",
+		"@elsewhere.test/v1",
+	} {
+		if _, err := c.GetBlob(context.Background(), p); !errors.Is(err, ErrBlobPath) {
+			t.Fatalf("%q: err = %v", p, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("calls = %d", calls.Load())
 	}
 }
 

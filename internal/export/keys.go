@@ -13,8 +13,10 @@ import (
 	"sort"
 	"time"
 
+	"github.com/thelemail/trust/pgp"
+	"github.com/thelemail/trust/vault"
+
 	"github.com/thelemail/export-tool/internal/api"
-	"github.com/thelemail/export-tool/internal/crypto"
 )
 
 const keysDir = "private-keys"
@@ -37,35 +39,49 @@ func (k AccountKey) file() string {
 	return fmt.Sprintf("%s/%d-%s.asc", keysDir, k.Version, k.Fingerprint)
 }
 
-func UnlockAccountKeys(resp api.AccountKeysResponse, passphrase []byte) (*crypto.Vault, []AccountKey, error) {
+func UnlockAccountKeys(store *vault.Store, accountID string, resp api.AccountKeysResponse, open func(vault.KeySet) error) (*Vault, []AccountKey, error) {
 	keys, err := checkKeyList(resp)
 	if err != nil {
 		return nil, nil, err
 	}
-	armored := make([]string, len(keys))
-	for i, k := range keys {
-		armored[i] = k.EncryptedPrivateKey
-	}
-	vault, results := crypto.UnlockVaultKeys(armored, passphrase)
+	var set vault.KeySet
+	var current *AccountKey
 	for i := range keys {
 		k := &keys[i]
-		res := results[i]
+		if k.Current {
+			current = k
+			set.Encrypted, set.KeyVersion = k.EncryptedPrivateKey, k.Version
+			continue
+		}
+		set.History = append(set.History, vault.HistoryKey{KeyVersion: k.Version, EncryptedPrivateKey: k.EncryptedPrivateKey})
+	}
+	if err := open(set); err != nil {
+		return nil, nil, fmt.Errorf("unlock current key %s: %w", current.Fingerprint, err)
+	}
+	results, err := store.KeyResults(accountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	byVersion := make(map[int]vault.KeyResult, len(results))
+	for _, r := range results {
+		byVersion[r.KeyVersion] = r
+	}
+	for i := range keys {
+		k := &keys[i]
+		res := byVersion[k.Version]
 		if res.Fingerprint != "" && res.Fingerprint != k.Fingerprint {
+			store.Lock(accountID)
 			return nil, nil, fmt.Errorf("key version %d is listed as %s but the key is %s", k.Version, k.Fingerprint, res.Fingerprint)
 		}
 		k.Fingerprints = res.Fingerprints
 		if len(k.Fingerprints) == 0 {
 			k.Fingerprints = publicFingerprints(resp.Keys[i], k.Fingerprint)
 		}
-		if res.Err == nil {
-			continue
+		if res.Err != nil {
+			k.UnlockError = res.Err.Error()
 		}
-		if k.Current {
-			return nil, nil, fmt.Errorf("unlock current key %s: %w", k.Fingerprint, res.Err)
-		}
-		k.UnlockError = res.Err.Error()
 	}
-	return vault, keys, nil
+	return NewVault(store, accountID), keys, nil
 }
 
 func checkKeyList(resp api.AccountKeysResponse) ([]AccountKey, error) {
@@ -121,8 +137,8 @@ func checkKeyList(resp api.AccountKeysResponse) ([]AccountKey, error) {
 
 func publicFingerprints(k api.AccountKey, primary string) []string {
 	if k.PublicKeyArmored != "" {
-		if fp, all, err := crypto.PublicKeyFingerprints(k.PublicKeyArmored); err == nil && fp == primary {
-			return all
+		if key, err := pgp.ParseKey(k.PublicKeyArmored); err == nil && !key.IsPrivate() && key.Fingerprint() == primary {
+			return key.Fingerprints()
 		}
 	}
 	return []string{primary}

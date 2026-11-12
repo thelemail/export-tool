@@ -60,25 +60,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		if payload != nil {
 			reader = bytes.NewReader(payload)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+		req, err := c.request(ctx, method, path, reader)
 		if err != nil {
 			return err
 		}
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		if c.token != "" {
-			req.Header.Set("Authorization", "Bearer "+c.token)
-		}
-		if c.accountID != "" {
-			req.Header.Set("X-Account-Id", c.accountID)
-		}
-		if c.webOrigin != "" {
-			req.Header.Set("Origin", c.webOrigin)
-		}
 		resp, err := c.http.Do(req)
 		if err != nil {
-			return &TransportError{Err: scrub(err)}
+			return &TransportError{Err: err}
 		}
 		defer func() { _ = resp.Body.Close() }()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
@@ -92,16 +83,53 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	})
 }
 
-func (c *Client) GetBlob(ctx context.Context, url string) ([]byte, error) {
+func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	if c.accountID != "" {
+		req.Header.Set("X-Account-Id", c.accountID)
+	}
+	if c.webOrigin != "" {
+		req.Header.Set("Origin", c.webOrigin)
+	}
+	return req, nil
+}
+
+var ErrBlobPath = errors.New("api: blob pointer is not a path on this API")
+
+func (c *Client) checkBlobPath(path string) error {
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.Contains(path, "\\") {
+		return fmt.Errorf("%w: %q", ErrBlobPath, path)
+	}
+	base, err := url.Parse(c.base)
+	if err != nil {
+		return err
+	}
+	full, err := url.Parse(c.base + path)
+	if err != nil || full.Scheme != base.Scheme || full.Host != base.Host {
+		return fmt.Errorf("%w: %q", ErrBlobPath, path)
+	}
+	return nil
+}
+
+func (c *Client) GetBlob(ctx context.Context, path string) ([]byte, error) {
+	if err := c.checkBlobPath(path); err != nil {
+		return nil, err
+	}
 	var body []byte
 	err := c.attempt(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := c.request(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return err
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
-			return &TransportError{Err: scrub(err)}
+			return &TransportError{Err: err}
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
@@ -110,7 +138,7 @@ func (c *Client) GetBlob(ctx context.Context, url string) ([]byte, error) {
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return &TransportError{Err: scrub(err)}
+			return &TransportError{Err: err}
 		}
 		return nil
 	})
@@ -186,16 +214,6 @@ func retryAfter(resp *http.Response) time.Duration {
 	return 0
 }
 
-func scrub(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		if i := strings.Index(ue.URL, "?"); i >= 0 {
-			return &url.Error{Op: ue.Op, URL: ue.URL[:i], Err: ue.Err}
-		}
-	}
-	return err
-}
-
 type TransportError struct {
 	Err error
 }
@@ -244,12 +262,4 @@ func Retryable(err error) bool {
 		return he.Retryable()
 	}
 	return false
-}
-
-func IsExpiredPointer(err error) bool {
-	var he *HTTPError
-	if !errors.As(err, &he) {
-		return false
-	}
-	return he.Status == http.StatusForbidden || he.Status == http.StatusNotFound
 }

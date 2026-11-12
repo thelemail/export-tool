@@ -11,7 +11,7 @@ import (
 	"net/textproto"
 	"strings"
 
-	"github.com/thelemail/export-tool/internal/attframe"
+	"github.com/thelemail/trust/attframe"
 )
 
 const base64LineLen = 76

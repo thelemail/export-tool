@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/thelemail/export-tool/internal/attframe"
+	"github.com/thelemail/trust/attframe"
 )
 
 func pdfPart(payload string) attachedPart {
