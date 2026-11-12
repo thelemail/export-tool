@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/thelemail/export-tool/internal/crypto"
 )
 
 const (
@@ -142,7 +140,7 @@ func extractPgpArmor(raw string) string {
 	return ""
 }
 
-func unwrapPgpMime(v *crypto.Vault, mimeStr string) string {
+func unwrapPgpMime(v *Vault, mimeStr string) string {
 	for depth := 0; depth < 3; depth++ {
 		if !isPgpEncryptedMime(mimeStr) {
 			return mimeStr
@@ -151,7 +149,7 @@ func unwrapPgpMime(v *crypto.Vault, mimeStr string) string {
 		if armorBlock == "" {
 			return mimeStr
 		}
-		inner, err := v.DecryptArmored(armorBlock)
+		inner, err := v.Decrypt([]byte(armorBlock))
 		if err != nil {
 			return mimeStr
 		}

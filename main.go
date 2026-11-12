@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,12 +12,15 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/thelemail/trust/opaque"
+	"github.com/thelemail/trust/vault"
 	"golang.org/x/term"
 
 	"github.com/thelemail/export-tool/internal/api"
-	"github.com/thelemail/export-tool/internal/crypto"
 	"github.com/thelemail/export-tool/internal/export"
 )
+
+var errAuth = errors.New("invalid email or password")
 
 var (
 	buildVersion = "dev"
@@ -65,41 +68,56 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 	if err != nil {
 		return fmt.Errorf("fetch opaque parameters: %w", err)
 	}
-	if err := crypto.VerifyParameters(crypto.Parameters{
-		Version:         params.OpaqueParamsVersion,
-		OPRF:            params.OPRF,
-		AKE:             params.AKE,
-		KDF:             params.KDF,
-		MAC:             params.MAC,
-		Hash:            params.Hash,
-		KSFName:         params.KSF.Name,
-		TimeCost:        params.KSF.TimeCost,
-		MemoryKiB:       params.KSF.MemoryKib,
-		Threads:         params.KSF.Threads,
-		Salt:            params.KSF.Salt,
-		KSFOutputLength: params.KSF.OutputLength,
-	}); err != nil {
+	pinned := opaque.Params{
+		Version: params.OpaqueParamsVersion,
+		OPRF:    params.OPRF,
+		AKE:     params.AKE,
+		KDF:     params.KDF,
+		MAC:     params.MAC,
+		Hash:    params.Hash,
+		KSF: opaque.KSFParams{
+			Name:         params.KSF.Name,
+			TimeCost:     params.KSF.TimeCost,
+			MemoryKiB:    params.KSF.MemoryKib,
+			Threads:      params.KSF.Threads,
+			Salt:         params.KSF.Salt,
+			OutputLength: params.KSF.OutputLength,
+		},
+	}
+	if err := pinned.RequirePinned(); err != nil {
 		return err
 	}
 
-	login, ke1, err := crypto.StartLogin(password)
+	auth := opaque.NewStore()
+	defer auth.LockAll()
+	keys := vault.NewStore(auth)
+	defer keys.LockAll()
+
+	login, err := auth.StartLogin(password, pinned)
 	if err != nil {
 		return err
 	}
-	defer login.Close()
+	defer auth.Abandon(login.OperationID)
+	ke1, err := base64.StdEncoding.DecodeString(login.Message)
+	if err != nil {
+		return err
+	}
 
 	init, err := client.LoginInit(ctx, email, ke1)
 	if err != nil {
 		return fmt.Errorf("login init: %w", err)
 	}
 	if init.AccountID == "" || len(init.KE2) == 0 {
-		return crypto.ErrAuth
+		return errAuth
 	}
-	ke3, exportKey, err := login.Finish(init.AccountID, init.KE2)
+	finished, err := auth.FinishLogin(login.OperationID, init.AccountID, base64.StdEncoding.EncodeToString(init.KE2), false)
+	if err != nil {
+		return errAuth
+	}
+	ke3, err := base64.StdEncoding.DecodeString(finished.KE3)
 	if err != nil {
 		return err
 	}
-	defer zero(exportKey)
 
 	grant, err := client.LoginComplete(ctx, init.ChallengeID, ke3)
 	if err != nil {
@@ -121,11 +139,18 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 	if err != nil {
 		return fmt.Errorf("list account keys: %w", err)
 	}
-	vault, keys, err := unlock(exportKey, grant, keyList)
-	if err != nil {
-		return err
+	if _, err := auth.CompleteLoginUnlock(login.OperationID, init.AccountID,
+		base64.StdEncoding.EncodeToString(grant.WrappedMasterKey),
+		base64.StdEncoding.EncodeToString(grant.MasterKeyID)); err != nil {
+		return fmt.Errorf("unlock mailbox key: %w", err)
 	}
-	printKeys(keys)
+	mailbox, accountKeys, err := export.UnlockAccountKeys(keys, init.AccountID, keyList, func(set vault.KeySet) error {
+		return keys.OpenFromOpaque(init.AccountID, set)
+	})
+	if err != nil {
+		return fmt.Errorf("unlock mailbox key: %w", err)
+	}
+	printKeys(accountKeys)
 
 	var session string
 	if hb, err := client.ExportHeartbeat(ctx, ""); err == nil {
@@ -134,40 +159,12 @@ func run(ctx context.Context, apiBase, webOrigin, email, password, out string) e
 
 	e := &export.Exporter{
 		Client:  client,
-		Vault:   vault,
+		Vault:   mailbox,
 		OutDir:  out,
 		Session: session,
-		Keys:    keys,
+		Keys:    accountKeys,
 	}
 	return e.Run(ctx)
-}
-
-func unlock(exportKey []byte, grant api.LoginSessionGrant, keyList api.AccountKeysResponse) (*crypto.Vault, []export.AccountKey, error) {
-	amk, err := crypto.UnwrapMasterKey(exportKey, grant.WrappedMasterKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unlock mailbox key: %w", err)
-	}
-	defer zero(amk)
-
-	id, err := crypto.DeriveMasterKeyID(amk)
-	if err != nil {
-		return nil, nil, err
-	}
-	if subtle.ConstantTimeCompare(id, grant.MasterKeyID) != 1 {
-		return nil, nil, fmt.Errorf("unlock mailbox key: master key does not match the account")
-	}
-
-	passphrase, err := crypto.DerivePGPPassphrase(amk)
-	if err != nil {
-		return nil, nil, err
-	}
-	pass := []byte(passphrase)
-	defer zero(pass)
-	vault, keys, err := export.UnlockAccountKeys(keyList, pass)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unlock mailbox key: %w", err)
-	}
-	return vault, keys, nil
 }
 
 func printKeys(keys []export.AccountKey) {
@@ -199,12 +196,6 @@ func solveTwoFactor(ctx context.Context, client *api.Client, ch *api.TwoFactorCh
 	}
 	code := strings.TrimSpace(promptSecret("Authenticator code: "))
 	return client.VerifyTOTP(ctx, ch.PendingToken, code)
-}
-
-func zero(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }
 
 var stdin = bufio.NewReader(os.Stdin)

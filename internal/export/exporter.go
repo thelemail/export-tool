@@ -14,9 +14,9 @@ import (
 	"sort"
 	"time"
 
+	"github.com/thelemail/trust/attframe"
+
 	"github.com/thelemail/export-tool/internal/api"
-	"github.com/thelemail/export-tool/internal/attframe"
-	"github.com/thelemail/export-tool/internal/crypto"
 )
 
 const (
@@ -28,7 +28,7 @@ var ErrIncomplete = errors.New("export incomplete")
 
 type Exporter struct {
 	Client  *api.Client
-	Vault   *crypto.Vault
+	Vault   *Vault
 	OutDir  string
 	Session string
 	Keys    []AccountKey

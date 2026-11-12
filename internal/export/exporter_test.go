@@ -3,7 +3,6 @@ package export
 import (
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,8 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thelemail/trust/attframe"
+
 	"github.com/thelemail/export-tool/internal/api"
-	"github.com/thelemail/export-tool/internal/attframe"
 )
 
 type fakeAttachment struct {
@@ -270,7 +270,7 @@ func newExporter(t *testing.T, f *fakeAPI, key *testKey, dir string) *Exporter {
 	client.MaxAttempts = 2
 	client.Backoff = time.Millisecond
 	client.SetSession("token", "account")
-	fp := hex.EncodeToString(key.entity.PrimaryKey.Fingerprint)
+	fp := key.key.Fingerprint()
 	f.mu.Lock()
 	f.keys = api.AccountKeysResponse{CurrentVersion: 1, Keys: []api.AccountKey{{KeyVersion: 1, KeyFingerprint: fp, IsCurrent: true}}}
 	f.mu.Unlock()
