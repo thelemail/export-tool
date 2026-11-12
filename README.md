@@ -73,9 +73,9 @@ You are prompted for your password and, if two-factor is enabled, for an authent
 
 ## How sign-in works
 
-Authentication is OPAQUE, an augmented PAKE: the password never leaves the machine, and the server never holds anything that a password can be tested against offline. The exchange runs against `/v1/auth/login/init` and `/v1/auth/login/complete` using [`github.com/bytemare/opaque`](https://github.com/bytemare/opaque), pinned to the same version the server runs.
+Authentication is OPAQUE, an augmented PAKE: the password never leaves the machine, and the server never holds anything that a password can be tested against offline. The exchange runs against `/v1/auth/login/init` and `/v1/auth/login/complete` using the OPAQUE client in [`github.com/thelemail/trust`](https://github.com/thelemail/trust), the same code the mobile app runs, built on [`github.com/bytemare/opaque`](https://github.com/bytemare/opaque) at the version the server runs.
 
-A successful exchange yields the OPAQUE export key. That unwraps the account master key, which derives the OpenPGP passphrase that opens the private key, which decrypts the mail. Every step of that chain has to match the web client exactly, down to the Argon2id profile and the client and server identity strings, or the envelope simply never opens. So before it sends anything the tool fetches the server's published parameters from `/v1/auth/opaque-parameters` and refuses to continue if they differ from the ones it was compiled with; `internal/crypto/opaque_test.go` pins the derivation to vectors taken from the web client's own implementation.
+A successful exchange yields the OPAQUE export key. That unwraps the account master key, which derives the OpenPGP passphrase that opens the private key, which decrypts the mail. Every step of that chain has to match the web client exactly, down to the Argon2id profile and the client and server identity strings, or the envelope simply never opens. So before it sends anything the tool fetches the server's published parameters from `/v1/auth/opaque-parameters` and refuses to continue if they differ from the ones it was compiled with; `opaque/keyschedule_test.go` in the trust module pins the derivation to vectors taken from the web client's own implementation.
 
 Accounts still on the older SRP scheme are not supported.
 
@@ -125,6 +125,8 @@ git checkout v1.0.0
 VERSION=1.0.0 COMMIT=$(git rev-parse HEAD) ./scripts/build-release.sh
 diff <(sort -k2 dist/SHA256SUMS) <(grep -E 'export-tool-1\.0\.0-(darwin|linux|windows)' SHA256SUMS | sort -k2)
 ```
+
+The build fetches `github.com/thelemail/trust`, which is a private repository until its own review is finished, so reproducing a release needs read access to it. Set `GOPRIVATE=github.com/thelemail/trust` and give Git a token for it.
 
 The builds are `CGO_ENABLED=0`, `-trimpath` and `-buildvcs=false`, with the build ID cleared, so the output does not depend on where you build it or what your working tree looks like. CI proves this on every run: the `reproducible` job builds twice from two different paths with a cold build cache and fails if the checksums disagree.
 
