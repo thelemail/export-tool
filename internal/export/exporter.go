@@ -19,10 +19,7 @@ import (
 	"github.com/thelemail/export-tool/internal/api"
 )
 
-const (
-	checkpointVersion = 2
-	maxPointerRefresh = 5
-)
+const checkpointVersion = 2
 
 var ErrIncomplete = errors.New("export incomplete")
 
@@ -467,10 +464,9 @@ func (e *Exporter) openAttachment(raw, keyFingerprint []byte) (attframe.Header, 
 }
 
 type messageFetch struct {
-	client    *api.Client
-	id        string
-	detail    api.MessageDetail
-	refreshes int
+	client *api.Client
+	id     string
+	detail api.MessageDetail
 }
 
 func (m *messageFetch) load(ctx context.Context) error {
@@ -482,7 +478,7 @@ func (m *messageFetch) load(ctx context.Context) error {
 	return nil
 }
 
-func (m *messageFetch) pointer(attachmentID string) (api.PresignedPointer, bool) {
+func (m *messageFetch) pointer(attachmentID string) (api.BlobPointer, bool) {
 	if attachmentID == "" {
 		return m.detail.Body, true
 	}
@@ -491,7 +487,7 @@ func (m *messageFetch) pointer(attachmentID string) (api.PresignedPointer, bool)
 			return a.Pointer, true
 		}
 	}
-	return api.PresignedPointer{}, false
+	return api.BlobPointer{}, false
 }
 
 func (m *messageFetch) fetch(ctx context.Context, attachmentID string) ([]byte, error) {
@@ -499,29 +495,14 @@ func (m *messageFetch) fetch(ctx context.Context, attachmentID string) ([]byte, 
 	if !ok {
 		return nil, fmt.Errorf("attachment %s vanished from the message", attachmentID)
 	}
-	raw, err := m.client.GetBlob(ctx, ptr.URL)
-	if err == nil {
-		return raw, verifyCiphertext(ptr, raw)
-	}
-	if !api.IsExpiredPointer(err) || m.refreshes >= maxPointerRefresh {
-		return nil, err
-	}
-	m.refreshes++
-	if lerr := m.load(ctx); lerr != nil {
-		return nil, lerr
-	}
-	ptr, ok = m.pointer(attachmentID)
-	if !ok {
-		return nil, err
-	}
-	raw, err = m.client.GetBlob(ctx, ptr.URL)
+	raw, err := m.client.GetBlob(ctx, ptr.Path)
 	if err != nil {
 		return nil, err
 	}
 	return raw, verifyCiphertext(ptr, raw)
 }
 
-func verifyCiphertext(ptr api.PresignedPointer, raw []byte) error {
+func verifyCiphertext(ptr api.BlobPointer, raw []byte) error {
 	if len(ptr.SHA256) == 0 {
 		return nil
 	}
