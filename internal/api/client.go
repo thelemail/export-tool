@@ -23,14 +23,17 @@ const (
 )
 
 type Client struct {
-	base      string
-	webOrigin string
-	http      *http.Client
-	mu        sync.Mutex
-	expires   time.Time
-	csrf      string
-	token     string
-	accountID string
+	base       string
+	webOrigin  string
+	clientType string
+	http       *http.Client
+	mu         sync.Mutex
+	renewing   sync.Mutex
+	ended      bool
+	expires    time.Time
+	csrf       string
+	token      string
+	accountID  string
 
 	MaxAttempts int
 	Backoff     time.Duration
@@ -47,6 +50,12 @@ func New(base, webOrigin string) *Client {
 	}
 }
 
+func (c *Client) SetClientType(clientType string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clientType = clientType
+}
+
 func (c *Client) SetSession(token, accountID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -55,6 +64,14 @@ func (c *Client) SetSession(token, accountID string) {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.call(ctx, method, path, body, out, true)
+}
+
+func (c *Client) doOnce(ctx context.Context, method, path string, body, out any) error {
+	return c.call(ctx, method, path, body, out, false)
+}
+
+func (c *Client) call(ctx context.Context, method, path string, body, out any, retry bool) error {
 	var payload []byte
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -63,7 +80,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		payload = raw
 	}
-	return c.attempt(ctx, func() error {
+	run := c.attempt
+	if !retry {
+		run = func(_ context.Context, fn func() error) error { return fn() }
+	}
+	return run(ctx, func() error {
 		var reader io.Reader
 		if payload != nil {
 			reader = bytes.NewReader(payload)
@@ -77,12 +98,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		resp, err := c.Do(req)
 		if err != nil {
-			return &TransportError{Err: err}
+			return sendError(err)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &HTTPError{Status: resp.StatusCode, Body: string(raw), RetryAfter: retryAfter(resp)}
+			return newHTTPError(resp, raw)
 		}
 		if out != nil && len(raw) > 0 {
 			return json.Unmarshal(raw, out)
@@ -128,12 +149,12 @@ func (c *Client) GetBlob(ctx context.Context, path string) ([]byte, error) {
 		}
 		resp, err := c.Do(req)
 		if err != nil {
-			return &TransportError{Err: err}
+			return sendError(err)
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			return &HTTPError{Status: resp.StatusCode, Body: string(b), RetryAfter: retryAfter(resp)}
+			return newHTTPError(resp, b)
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
@@ -213,6 +234,15 @@ func retryAfter(resp *http.Response) time.Duration {
 	return 0
 }
 
+func sendError(err error) error {
+	var he *HTTPError
+	if errors.As(err, &he) || errors.Is(err, ErrSessionEnded) || errors.Is(err, ErrOutsideAPI) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &TransportError{Err: err}
+}
+
 type TransportError struct {
 	Err error
 }
@@ -222,8 +252,28 @@ func (e *TransportError) Unwrap() error { return e.Err }
 
 type HTTPError struct {
 	Status     int
+	Code       string
+	Message    string
 	Body       string
 	RetryAfter time.Duration
+}
+
+func newHTTPError(resp *http.Response, body []byte) *HTTPError {
+	e := &HTTPError{Status: resp.StatusCode, Body: string(body), RetryAfter: retryAfter(resp)}
+	var env struct {
+		Error struct {
+			Code              string `json:"code"`
+			Message           string `json:"message"`
+			RetryAfterSeconds int64  `json:"retryAfterSeconds"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &env) == nil {
+		e.Code, e.Message = env.Error.Code, env.Error.Message
+		if e.RetryAfter == 0 && env.Error.RetryAfterSeconds > 0 {
+			e.RetryAfter = time.Duration(env.Error.RetryAfterSeconds) * time.Second
+		}
+	}
+	return e
 }
 
 func (e *HTTPError) Error() string {
