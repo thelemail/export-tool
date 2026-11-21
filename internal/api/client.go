@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +26,9 @@ type Client struct {
 	base      string
 	webOrigin string
 	http      *http.Client
+	mu        sync.Mutex
+	expires   time.Time
+	csrf      string
 	token     string
 	accountID string
 
@@ -32,16 +37,19 @@ type Client struct {
 }
 
 func New(base, webOrigin string) *Client {
+	jar, _ := cookiejar.New(nil)
 	return &Client{
 		base:        strings.TrimRight(base, "/"),
 		webOrigin:   webOrigin,
-		http:        &http.Client{Timeout: 120 * time.Second},
+		http:        &http.Client{Timeout: 120 * time.Second, Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		MaxAttempts: defaultMaxAttempts,
 		Backoff:     defaultBackoff,
 	}
 }
 
 func (c *Client) SetSession(token, accountID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.token = token
 	c.accountID = accountID
 }
@@ -67,7 +75,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		resp, err := c.http.Do(req)
+		resp, err := c.Do(req)
 		if err != nil {
 			return &TransportError{Err: err}
 		}
@@ -87,15 +95,6 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return nil, err
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	if c.accountID != "" {
-		req.Header.Set("X-Account-Id", c.accountID)
-	}
-	if c.webOrigin != "" {
-		req.Header.Set("Origin", c.webOrigin)
 	}
 	return req, nil
 }
@@ -127,7 +126,7 @@ func (c *Client) GetBlob(ctx context.Context, path string) ([]byte, error) {
 		if err != nil {
 			return err
 		}
-		resp, err := c.http.Do(req)
+		resp, err := c.Do(req)
 		if err != nil {
 			return &TransportError{Err: err}
 		}
