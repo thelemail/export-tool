@@ -24,11 +24,13 @@ const checkpointVersion = 2
 var ErrIncomplete = errors.New("export incomplete")
 
 type Exporter struct {
-	Client  *api.Client
-	Vault   *Vault
-	OutDir  string
-	Session string
-	Keys    []AccountKey
+	Output   io.Writer
+	Progress func(folder string, messages int)
+	Client   *api.Client
+	Vault    *Vault
+	OutDir   string
+	Session  string
+	Keys     []AccountKey
 }
 
 type folder struct {
@@ -69,10 +71,16 @@ type checkpoint struct {
 }
 
 func (e *Exporter) Run(ctx context.Context) error {
+	if e.Output == nil {
+		e.Output = os.Stdout
+	}
 	if err := os.MkdirAll(e.OutDir, 0o700); err != nil {
 		return err
 	}
-	cp := e.loadCheckpoint()
+	cp, err := e.loadCheckpoint()
+	if err != nil {
+		return fmt.Errorf("read export checkpoint: %w", err)
+	}
 	stop := e.startHeartbeat(ctx)
 	defer stop()
 
@@ -85,17 +93,34 @@ func (e *Exporter) Run(ctx context.Context) error {
 		cp.KeySet = keySet
 	} else if cp.KeySet != keySet {
 		if cp.started() {
-			fmt.Println("Your keys changed since the last run, so the export starts over.")
+			fmt.Fprintln(e.Output, "Your keys changed since the last run, so the export starts over.")
 		}
 		if err := e.restart(cp, all, keySet); err != nil {
 			return err
 		}
 	}
 
+	for _, f := range all {
+		if _, ok := cp.Offsets[f.name]; ok {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(e.OutDir, f.name+".mbox"))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			cp.Offsets[f.name] = 0
+		case err != nil:
+			return err
+		default:
+			cp.Offsets[f.name] = info.Size()
+		}
+	}
+	if err := e.saveCheckpoint(cp); err != nil {
+		return err
+	}
 	worthAnotherSweep := map[string]bool{}
 	for _, f := range all {
 		if !cp.Done[f.name] {
-			fmt.Printf("Exporting %s...\n", f.name)
+			fmt.Fprintf(e.Output, "Exporting %s...\n", f.name)
 			if err := e.exportFolder(ctx, f, cp); err != nil {
 				return fmt.Errorf("export %s: %w", f.name, err)
 			}
@@ -105,8 +130,9 @@ func (e *Exporter) Run(ctx context.Context) error {
 			return fmt.Errorf("retry %s: %w", f.name, err)
 		}
 		worthAnotherSweep[f.name] = recovered > 0
+		e.progress(f.name, cp)
 		totals := cp.Totals[f.name]
-		fmt.Printf("  %s: %d messages, %d attachments\n", f.name, totals.Messages, totals.Attachments)
+		fmt.Fprintf(e.Output, "  %s: %d messages, %d attachments\n", f.name, totals.Messages, totals.Attachments)
 	}
 
 	for _, f := range all {
@@ -138,36 +164,36 @@ func (e *Exporter) Run(ctx context.Context) error {
 	}
 	if e.Session != "" {
 		if err := e.Client.ExportComplete(ctx, e.Session); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not close the export session: %v\n", err)
+			fmt.Fprintf(e.Output, "warning: could not close the export session: %v\n", err)
 		}
 	}
-	fmt.Printf("Done. Files written to %s\n", e.OutDir)
+	fmt.Fprintf(e.Output, "Done. Files written to %s\n", e.OutDir)
 	return nil
 }
 
 func (e *Exporter) printIncomplete(r report) {
-	fmt.Println()
-	fmt.Printf("Incomplete. %d could not be fetched, %d could not be read, %d of your keys would not unlock.\n", len(r.Pending), len(r.Lost), len(r.KeyWarnings))
-	printFailures("could not fetch", r.Pending)
-	printFailures("could not read", r.Lost)
+	fmt.Fprintln(e.Output)
+	fmt.Fprintf(e.Output, "Incomplete. %d could not be fetched, %d could not be read, %d of your keys would not unlock.\n", len(r.Pending), len(r.Lost), len(r.KeyWarnings))
+	e.printFailures("could not fetch", r.Pending)
+	e.printFailures("could not read", r.Lost)
 	for _, k := range r.KeyWarnings {
-		fmt.Printf("  key version %d (%s) could not be unlocked: %s\n", k.Version, k.Fingerprint, k.Error)
+		fmt.Fprintf(e.Output, "  key version %d (%s) could not be unlocked: %s\n", k.Version, k.Fingerprint, k.Error)
 	}
 	if r.KeyCheck != "" {
-		fmt.Printf("  %s\n", r.KeyCheck)
+		fmt.Fprintf(e.Output, "  %s\n", r.KeyCheck)
 	}
-	fmt.Printf("\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
+	fmt.Fprintf(e.Output, "\nAll of it is listed in %s.\n", filepath.Join(e.OutDir, "export-report.json"))
 	if len(r.Pending) > 0 {
-		fmt.Println("Re-run the same command with the same --out to retry those.")
+		fmt.Fprintln(e.Output, "Re-run the same command with the same --out to retry those.")
 	}
-	fmt.Println("The export was not marked complete on the server.")
+	fmt.Fprintln(e.Output, "The export was not marked complete on the server.")
 }
 
-func printFailures(label string, items []failure) {
+func (e *Exporter) printFailures(label string, items []failure) {
 	const shown = 10
 	for i, f := range items {
 		if i == shown {
-			fmt.Printf("  ... and %d more\n", len(items)-shown)
+			fmt.Fprintf(e.Output, "  ... and %d more\n", len(items)-shown)
 			break
 		}
 		where := f.MessageID
@@ -176,7 +202,7 @@ func printFailures(label string, items []failure) {
 		} else {
 			where += " " + f.Stage
 		}
-		fmt.Printf("  %s %s/%s: %s\n", label, f.Folder, where, f.Error)
+		fmt.Fprintf(e.Output, "  %s %s/%s: %s\n", label, f.Folder, where, f.Error)
 	}
 }
 
@@ -188,6 +214,10 @@ func (e *Exporter) openFolder(f folder, cp *checkpoint) (*os.File, error) {
 	}
 	offset, known := cp.Offsets[f.name]
 	if known {
+		if size, err := fileSize(file); err != nil || size < offset {
+			_ = file.Close()
+			return nil, fmt.Errorf("export file %s is shorter than its checkpoint or unreadable", f.name)
+		}
 		if err := file.Truncate(offset); err != nil {
 			_ = file.Close()
 			return nil, err
@@ -239,11 +269,28 @@ func (e *Exporter) exportFolder(ctx context.Context, f folder, cp *checkpoint) e
 		cp.Offsets[f.name] = pos
 		cp.Cursors[f.name] = cursor
 		cp.Done[f.name] = cursor == ""
-		e.saveCheckpoint(cp)
+		if err := file.Sync(); err != nil {
+			return err
+		}
+		if err := e.saveCheckpoint(cp); err != nil {
+			return err
+		}
+		e.progress(f.name, cp)
 		if cursor == "" {
 			return nil
 		}
 	}
+}
+
+func (e *Exporter) progress(folder string, cp *checkpoint) {
+	if e.Progress == nil {
+		return
+	}
+	n := 0
+	for _, t := range cp.Totals {
+		n += t.Messages
+	}
+	e.Progress(folder, n)
 }
 
 func (e *Exporter) exportOne(ctx context.Context, folderName, messageID string, file *os.File, cp *checkpoint) error {
@@ -340,7 +387,13 @@ func (e *Exporter) retryPending(ctx context.Context, f folder, cp *checkpoint) (
 		return recovered, err
 	}
 	cp.Offsets[f.name] = pos
-	e.saveCheckpoint(cp)
+	if err := file.Sync(); err != nil {
+		return recovered, err
+	}
+	if err := e.saveCheckpoint(cp); err != nil {
+		return recovered, err
+	}
+	e.progress(f.name, cp)
 	return recovered, nil
 }
 
@@ -553,11 +606,20 @@ func (e *Exporter) writeSettings(ctx context.Context) error {
 
 func (e *Exporter) checkpointPath() string { return filepath.Join(e.OutDir, ".export-checkpoint.json") }
 
-func (e *Exporter) loadCheckpoint() *checkpoint {
+func (e *Exporter) loadCheckpoint() (*checkpoint, error) {
 	cp := &checkpoint{Version: checkpointVersion}
 	raw, err := os.ReadFile(e.checkpointPath())
 	if err == nil {
-		_ = json.Unmarshal(raw, cp)
+		if err := json.Unmarshal(raw, cp); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	for name, off := range cp.Offsets {
+		if !filepath.IsLocal(name) || filepath.Base(name) != name || off < 0 {
+			return nil, errors.New("invalid checkpoint folder offset")
+		}
 	}
 	cp.Version = checkpointVersion
 	if cp.Cursors == nil {
@@ -578,7 +640,7 @@ func (e *Exporter) loadCheckpoint() *checkpoint {
 	if cp.Labels == nil {
 		cp.Labels = map[string]labelRecord{}
 	}
-	return cp
+	return cp, nil
 }
 
 func (cp *checkpoint) started() bool {
@@ -611,16 +673,26 @@ func (e *Exporter) restart(cp *checkpoint, all []folder, keySet string) error {
 	for _, f := range all {
 		cp.Offsets[f.name] = 0
 	}
-	e.saveCheckpoint(cp)
-	return nil
+	return e.saveCheckpoint(cp)
 }
 
-func (e *Exporter) saveCheckpoint(cp *checkpoint) {
-	raw, err := json.MarshalIndent(cp, "", "  ")
+func (e *Exporter) saveCheckpoint(cp *checkpoint) error {
+	f, err := os.CreateTemp(e.OutDir, ".checkpoint-*")
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(e.checkpointPath(), raw, 0o600)
+	defer func() { _ = os.Remove(f.Name()) }()
+	if err = json.NewEncoder(f).Encode(cp); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(f.Name(), e.checkpointPath())
 }
 
 func (e *Exporter) startHeartbeat(ctx context.Context) func() {

@@ -726,3 +726,42 @@ func TestRunExportsCustomFoldersAndTheirLabels(t *testing.T) {
 		t.Fatalf("report = %+v", r)
 	}
 }
+
+func TestResumeRestoresFirstPageStartingOffset(t *testing.T) {
+	f := newFakeAPI(t)
+	key := newTestKey(t)
+	f.put("body", key.encrypt(t, []byte(plainBody)))
+	f.add("inbox", []fakeMessage{{id: "m1", bodyKey: "body"}, {id: "m2", bodyKey: "body"}})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "inbox.mbox")
+	const prior = "prior CLI output\n"
+	if err := os.WriteFile(path, []byte(prior), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	interrupted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/messages/m2" {
+			cancel()
+			return
+		}
+		f.route(w, r)
+	}))
+	defer interrupted.Close()
+	first := newExporter(t, f, key, dir)
+	first.Client = api.New(interrupted.URL, "http://localhost")
+	first.Client.SetSession("token", "account")
+	if err := first.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wanted cancellation; got %v", err)
+	}
+	if got := countEntries(readFile(t, path)); got != 1 {
+		t.Fatalf("expected one uncommitted entry on disk, got %d", got)
+	}
+	if err := newExporter(t, f, key, dir).Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	final := readFile(t, path)
+	if !strings.HasPrefix(final, prior) || countEntries(final) != 2 {
+		t.Fatalf("resume did not restore the initial offset (%d entries)", countEntries(final))
+	}
+}
