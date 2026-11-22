@@ -3,6 +3,7 @@ module github.com/thelemail/export-tool
 go 1.27.4
 
 require (
+	github.com/altcha-org/altcha-lib-go/v2 v2.4.1
 	github.com/google/uuid v1.6.0
 	github.com/thelemail/trust v0.6.0
 	golang.org/x/term v0.47.0

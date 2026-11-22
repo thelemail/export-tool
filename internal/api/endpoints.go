@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -41,28 +42,33 @@ type LoginInitRequest struct {
 }
 
 type LoginInitResponse struct {
-	ChallengeID string `json:"challengeId"`
-	AccountID   string `json:"accountId"`
-	KE2         []byte `json:"ke2"`
+	ProofChallenge json.RawMessage `json:"proofChallenge,omitempty"`
+	ChallengeID    string          `json:"challengeId"`
+	AccountID      string          `json:"accountId"`
+	KE2            []byte          `json:"ke2"`
 }
 
 func (c *Client) LoginInit(ctx context.Context, email string, ke1 []byte) (LoginInitResponse, error) {
 	var out LoginInitResponse
-	err := c.do(ctx, http.MethodPost, "/v1/auth/login/init", LoginInitRequest{Email: email, KE1: ke1}, &out)
+	err := c.doOnce(ctx, http.MethodPost, "/v1/auth/login/init", LoginInitRequest{Email: email, KE1: ke1}, &out)
 	return out, err
 }
 
 type LoginCompleteRequest struct {
+	Proof       string `json:"proof,omitempty"`
 	ChallengeID string `json:"challengeId"`
 	KE3         []byte `json:"ke3"`
 }
 
 type TwoFactorChallenge struct {
-	PendingToken string   `json:"pendingToken"`
-	Methods      []string `json:"methods"`
+	ExpiresInSeconds int      `json:"expiresInSeconds"`
+	PendingToken     string   `json:"pendingToken"`
+	Methods          []string `json:"methods"`
 }
 
 type LoginSessionGrant struct {
+	Scope               string              `json:"scope,omitempty"`
+	CSRFToken           string              `json:"csrfToken"`
 	AccountID           string              `json:"accountId"`
 	AccessToken         string              `json:"accessToken"`
 	ExpiresInSeconds    int                 `json:"expiresInSeconds"`
@@ -70,11 +76,12 @@ type LoginSessionGrant struct {
 	MasterKeyID         []byte              `json:"masterKeyId"`
 	OpaqueParamsVersion int                 `json:"opaqueParamsVersion"`
 	TwoFactor           *TwoFactorChallenge `json:"twoFactor"`
+	Staged              bool                `json:"staged"`
 }
 
-func (c *Client) LoginComplete(ctx context.Context, challengeID string, ke3 []byte) (LoginSessionGrant, error) {
+func (c *Client) LoginComplete(ctx context.Context, challengeID string, ke3 []byte, proof string) (LoginSessionGrant, error) {
 	var out LoginSessionGrant
-	err := c.do(ctx, http.MethodPost, "/v1/auth/login/complete", LoginCompleteRequest{ChallengeID: challengeID, KE3: ke3}, &out)
+	err := c.doOnce(ctx, http.MethodPost, "/v1/auth/login/complete", LoginCompleteRequest{ChallengeID: challengeID, KE3: ke3, Proof: proof}, &out)
 	return out, err
 }
 
@@ -85,14 +92,40 @@ type TwoFactorVerifyRequest struct {
 
 func (c *Client) VerifyTOTP(ctx context.Context, pendingToken, code string) (LoginSessionGrant, error) {
 	var out LoginSessionGrant
-	err := c.do(ctx, http.MethodPost, "/v1/auth/2fa/totp/verify", TwoFactorVerifyRequest{PendingToken: pendingToken, Code: code}, &out)
+	err := c.doOnce(ctx, http.MethodPost, "/v1/auth/2fa/totp/verify", TwoFactorVerifyRequest{PendingToken: pendingToken, Code: code}, &out)
 	return out, err
 }
 
 func (c *Client) VerifyBackupCode(ctx context.Context, pendingToken, code string) (LoginSessionGrant, error) {
 	var out LoginSessionGrant
-	err := c.do(ctx, http.MethodPost, "/v1/auth/2fa/backup-code/verify", TwoFactorVerifyRequest{PendingToken: pendingToken, Code: code}, &out)
+	err := c.doOnce(ctx, http.MethodPost, "/v1/auth/2fa/backup-code/verify", TwoFactorVerifyRequest{PendingToken: pendingToken, Code: code}, &out)
 	return out, err
+}
+
+func (c *Client) VerifyPasskey(ctx context.Context, pending string, credential json.RawMessage) (LoginSessionGrant, error) {
+	var grant LoginSessionGrant
+	req := struct {
+		Pending    string          `json:"pendingToken"`
+		Credential json.RawMessage `json:"credential"`
+	}{pending, credential}
+	err := c.doOnce(ctx, http.MethodPost, "/v1/auth/2fa/webauthn/verify", req, &grant)
+	return grant, err
+}
+
+func (c *Client) WebauthnLoginInit(ctx context.Context, pending string) (json.RawMessage, error) {
+	var out struct {
+		PublicKey json.RawMessage `json:"publicKey"`
+	}
+	req := struct {
+		Pending string `json:"pendingToken"`
+	}{pending}
+	if err := c.doOnce(ctx, http.MethodPost, "/v1/auth/2fa/webauthn/init", req, &out); err != nil {
+		return nil, err
+	}
+	if len(out.PublicKey) == 0 || out.PublicKey[0] != '{' {
+		return nil, errors.New("api: passkey options missing from the server response")
+	}
+	return out.PublicKey, nil
 }
 
 type AccountKey struct {

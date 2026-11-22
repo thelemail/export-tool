@@ -149,6 +149,7 @@ func customFolders(org organization) []folder {
 		params := url.Values{}
 		params.Set("mailbox", "folder")
 		params.Set("folderId", f.ID)
+		params.Set("descendants", "false")
 		params.Set("sort", "oldest")
 		params.Set("limit", "50")
 		out = append(out, folder{name: f.File, params: params})
