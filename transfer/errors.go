@@ -39,6 +39,14 @@ func (p *problem) Unwrap() []error { return []error{p.kind, p.cause} }
 
 func because(kind, cause error) error { return &problem{kind: kind, cause: cause} }
 
+func HTTPStatus(err error) int {
+	var he *api.HTTPError
+	if errors.As(err, &he) {
+		return he.Status
+	}
+	return 0
+}
+
 func classify(err error) error {
 	var he *api.HTTPError
 	if !errors.As(err, &he) {
